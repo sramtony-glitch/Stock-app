@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 import io
-import os
 import pandas as pd
 import plotly.graph_objects as io_plotly
 from plotly.subplots import make_subplots
@@ -59,7 +58,7 @@ def check_password():
 # 🚀 2. 主程式
 # ----------------------------------------------------
 if check_password():
-  st.title("📈 台股股價 vs 散戶持股比例對照圖")
+  st.title("📈 台股每日股價 vs 三大法人買賣超對照圖")
 
   # 📥 介面輸入欄位
   col1, col2, col3 = st.columns([2, 1.5, 1.5])
@@ -79,107 +78,38 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 歷史每週籌碼載入器 (點對點連線，絕不平行拉直線)
+  # 📊 每日三大法人買賣超 API 擷取器 (每日 15:30 更新)
   # ----------------------------------------------------
-  def get_weekly_chip_data(stock_code):
-    records = []
-
-    # A. 優先嘗試讀取本地 history_chips.csv
-    if os.path.exists("history_chips.csv"):
-      try:
-        csv_df = pd.read_csv("history_chips.csv", dtype=str)
-        csv_df["stock_id"] = csv_df["stock_id"].str.strip()
-        matched = csv_df[csv_df["stock_id"] == stock_code]
-        if not matched.empty:
-          for _, row in matched.iterrows():
-            records.append({
-                "Date": pd.to_datetime(row["date"]),
-                "Retail_Ratio": float(row["Retail_Ratio"]),
-            })
-      except Exception:
-        pass
-
-    # B. 若 CSV 無資料，使用內建備用每週數據庫（台積電 2330 等熱門股歷史波動）
-    if not records and stock_code == "2330":
-      builtin_data = [
-          ("2026-05-01", 10.25),
-          ("2026-05-08", 10.18),
-          ("2026-05-15", 10.32),
-          ("2026-05-22", 10.12),
-          ("2026-05-29", 9.98),
-          ("2026-06-05", 9.85),
-          ("2026-06-12", 9.72),
-          ("2026-06-19", 9.88),
-          ("2026-06-26", 10.05),
-          ("2026-07-03", 10.15),
-          ("2026-07-10", 10.02),
-          ("2026-07-17", 9.91),
-          ("2026-07-24", 9.96),
-      ]
-      for d_str, val in builtin_data:
-        records.append({"Date": pd.to_datetime(d_str), "Retail_Ratio": val})
-
-    # C. 嘗試聯網擷取最新一週集保數據
+  @st.cache_data(ttl=1800)
+  def fetch_daily_institutional_investors(stock_code, s_date, e_date):
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+        "data_id": stock_code,
+        "start_date": s_date.strftime("%Y-%m-%d"),
+        "end_date": e_date.strftime("%Y-%m-%d"),
+    }
     try:
-      url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
-      res = requests.get(
-          url,
-          headers={
-              "User-Agent": (
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                  " AppleWebKit/537.36"
-              )
-          },
-          verify=False,
-          timeout=5,
-      )
-      res.encoding = "utf-8"
-      df_tdcc = pd.read_csv(io.StringIO(res.text), dtype=str)
+      resp = requests.get(url, params=params, timeout=15)
+      data = resp.json()
+      if data.get("msg") == "success" and data.get("data"):
+        df = pd.DataFrame(data["data"])
+        # 計算每日三大法人合計買賣超 (買進 - 賣出，單位：張)
+        df["buy"] = pd.to_numeric(df["buy"], errors="coerce")
+        df["sell"] = pd.to_numeric(df["sell"], errors="coerce")
+        df["net"] = (df["buy"] - df["sell"]) / 1000.0  # 轉為張數
 
-      date_col, code_col, level_col, shares_col = (
-          df_tdcc.columns[0],
-          df_tdcc.columns[1],
-          df_tdcc.columns[2],
-          df_tdcc.columns[4],
-      )
-      df_tdcc[code_col] = df_tdcc[code_col].str.strip()
-      df_tdcc[level_col] = pd.to_numeric(df_tdcc[level_col], errors="coerce")
-      df_tdcc[shares_col] = pd.to_numeric(df_tdcc[shares_col], errors="coerce")
-
-      stock_tdcc = df_tdcc[df_tdcc[code_col] == stock_code].copy()
-      if not stock_tdcc.empty:
-        d_obj = pd.to_datetime(
-            stock_tdcc[date_col].iloc[0], format="%Y%m%d", errors="coerce"
-        )
-        total_row = stock_tdcc[stock_tdcc[level_col] == 17]
-        tot_shares = (
-            total_row[shares_col].values[0]
-            if not total_row.empty
-            else stock_tdcc[shares_col].sum()
-        )
-        retail_shares = stock_tdcc[
-            stock_tdcc[level_col].between(1, 9)
-        ][shares_col].sum()
-        retail_ratio = (
-            (retail_shares / tot_shares) * 100 if tot_shares > 0 else 0
-        )
-
-        records.append(
-            {"Date": d_obj, "Retail_Ratio": round(retail_ratio, 2)}
-        )
+        summary = df.groupby("date")["net"].sum().reset_index()
+        summary.columns = ["Date", "Institutional_Net"]
+        summary["Date"] = pd.to_datetime(summary["Date"])
+        return summary.sort_values("Date")
     except Exception:
       pass
-
-    if records:
-      df_res = pd.DataFrame(records)
-      df_res = df_res.drop_duplicates(subset=["Date"], keep="last")
-      return df_res.sort_values("Date")
-
     return pd.DataFrame()
 
   try:
-    with st.spinner("正在讀取歷史股價與籌碼資料..."):
-      # 1. 下載股價
+    with st.spinner("正在讀取每日股價與三大法人籌碼資料..."):
+      # 1. 股價資料 (Yahoo Finance)
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -190,8 +120,10 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
-      # 2. 載入每週籌碼
-      chip_df = get_weekly_chip_data(stock_id)
+      # 2. 三大法人每日買賣超
+      inst_df = fetch_daily_institutional_investors(
+          stock_id, start_date, end_date
+      )
 
   except Exception as e:
     st.error(f"資料讀取失敗：{e}")
@@ -203,26 +135,26 @@ if check_password():
   if price_df.empty:
     st.warning(f"❌ 查無股票代號【{stock_id}】的股價資料！")
   else:
-    # 提取股價收盤價
+    # 提取股價 Close 欄位
     if isinstance(price_df.columns, pd.MultiIndex):
       price_series = price_df["Close"][ticker]
     else:
       price_series = price_df["Close"]
 
-    # 篩選日期區間內的籌碼
-    if not chip_df.empty:
-      mask = (chip_df["Date"].dt.date >= start_date) & (
-          chip_df["Date"].dt.date <= end_date
-      )
-      chip_df = chip_df[mask]
+    plot_df = pd.DataFrame({"Price": price_series})
+    plot_df.index = pd.to_datetime(plot_df.index)
+
+    if not inst_df.empty:
+      inst_df = inst_df.set_index("Date")
+      plot_df = plot_df.join(inst_df, how="left")
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # 折線一：淺藍色 股票價格 (左 Y 軸) - 每日頻率
+    # 折線一：淺藍色 股票價格 (左 Y 軸) - 每日數據
     fig.add_trace(
         io_plotly.Scatter(
-            x=price_series.index,
-            y=price_series.values,
+            x=plot_df.index,
+            y=plot_df["Price"],
             name="股票價格",
             mode="lines",
             line=dict(color="#3399FF", width=3),
@@ -231,25 +163,27 @@ if check_password():
         secondary_y=False,
     )
 
-    # 折線二：橘紅色 散戶持倉% (右 Y 軸) - 每週點對點滑順連線！
-    if not chip_df.empty and len(chip_df) > 0:
+    # 折線二：橘紅色 三大法人每日買賣超 (右 Y 軸) - 每日數據
+    if "Institutional_Net" in plot_df.columns and not plot_df[
+        "Institutional_Net"
+    ].isna().all():
       fig.add_trace(
           io_plotly.Scatter(
-              x=chip_df["Date"],
-              y=chip_df["Retail_Ratio"],
-              name="散戶持倉比(%)",
+              x=plot_df.index,
+              y=plot_df["Institutional_Net"],
+              name="法人買賣超(張)",
               mode="lines+markers",
-              line=dict(color="#FF4D4D", width=3),
-              marker=dict(size=7, color="#FF4D4D"),
-              connectgaps=True,  # 自動將每週五的資料點連成起伏斜線
-              hovertemplate="%{x|%Y-%m-%d}<br>散戶持倉: %{y:.2f}%",
+              line=dict(color="#FF4D4D", width=2),
+              marker=dict(size=5, color="#FF4D4D"),
+              connectgaps=True,
+              hovertemplate="%{x|%Y-%m-%d}<br>法人買賣超: %{y:,.0f} 張",
           ),
           secondary_y=True,
       )
 
     # 圖表佈局設定
     fig.update_layout(
-        title=f"<b>股票代號：{stock_id} 股價 vs 散戶持倉比</b>",
+        title=f"<b>股票代號：{stock_id} 每日股價 vs 三大法人買賣超</b>",
         title_x=0.4,
         hovermode="x unified",
         autosize=True,
@@ -267,9 +201,9 @@ if check_password():
         gridcolor="#E2E2E2",
     )
 
-    # 右 Y 軸：橘紅色 {散戶持倉比}
+    # 右 Y 軸：橘紅色 {法人買賣超}
     fig.update_yaxes(
-        title_text="<b style='color:#FF4D4D;'>散戶持倉比 (%)</b>",
+        title_text="<b style='color:#FF4D4D;'>三大法人買賣超 (張)</b>",
         secondary_y=True,
         showgrid=False,
     )
