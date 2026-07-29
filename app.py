@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import io
+from FinMind.data import DataLoader
 import pandas as pd
 import plotly.graph_objects as io_plotly
 from plotly.subplots import make_subplots
@@ -80,36 +81,22 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 下載籌碼資料 (TDCC)
+  # 📊 抓取歷史籌碼資料 (使用 FinMind API)
   # ----------------------------------------------------
   @st.cache_data(ttl=3600)
-  def fetch_tdcc_data():
-    url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        )
-    }
-    res = requests.get(url, headers=headers, verify=False, timeout=30)
-    res.encoding = "utf-8"
-    df = pd.read_csv(io.StringIO(res.text), dtype=str)
-
-    date_col, code_col, level_col, shares_col = (
-        df.columns[0],
-        df.columns[1],
-        df.columns[2],
-        df.columns[4],
+  def fetch_chip_history(stock_code, s_date, e_date):
+    dl = DataLoader()
+    # 抓取股權分散表歷史資料
+    df_chip = dl.taiwan_stock_holding_shares_per(
+        stock_id=stock_code,
+        start_date=s_date.strftime("%Y-%m-%d"),
+        end_date=e_date.strftime("%Y-%m-%d"),
     )
-    df[code_col] = df[code_col].str.strip()
-    df[level_col] = pd.to_numeric(df[level_col], errors="coerce")
-    df[shares_col] = pd.to_numeric(df[shares_col], errors="coerce")
-    return df, date_col, code_col, level_col, shares_col
+    return df_chip
 
   try:
-    with st.spinner("讀取籌碼與股價資料中..."):
-      tdcc_df, date_col, code_col, level_col, shares_col = fetch_tdcc_data()
-
-      # 下載 Yahoo Finance 股價
+    with st.spinner("正在抓取歷史籌碼與股價資料..."):
+      # 1. 抓取股價 (Yahoo Finance)
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -121,53 +108,38 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
+      # 2. 抓取籌碼歷史 (FinMind)
+      chip_raw = fetch_chip_history(stock_id, start_date, end_date)
+
   except Exception as e:
     st.error(f"資料讀取失敗：{e}")
     st.stop()
 
   # ----------------------------------------------------
-  # 📈 計算籌碼比例
+  # 📈 計算散戶持股比例歷史折線
   # ----------------------------------------------------
-  stock_chips = tdcc_df[tdcc_df[code_col] == stock_id].copy()
-
-  if stock_chips.empty or price_df.empty:
-    st.warning(f"❌ 查無股票代號【{stock_id}】在此區間的完整資料！")
+  if price_df.empty:
+    st.warning(f"❌ 查無股票代號【{stock_id}】的股價資料！")
   else:
-    # 轉為日期物件
-    stock_chips["Date_Obj"] = pd.to_datetime(
-        stock_chips[date_col], format="%Y%m%d", errors="coerce"
-    )
-    stock_chips = stock_chips.dropna(subset=["Date_Obj"])
-
-    # 篩選日期區間
-    mask = (stock_chips["Date_Obj"].dt.date >= start_date) & (
-        stock_chips["Date_Obj"].dt.date <= end_date
-    )
-    filtered_chips = stock_chips[mask]
-
-    chip_summary = []
-    for d, group in filtered_chips.groupby("Date_Obj"):
-      total_row = group[group[level_col] == 17]
-      tot_shares = (
-          total_row[shares_col].values[0]
-          if not total_row.empty
-          else group[shares_col].sum()
+    # 處理 FinMind 籌碼數據
+    chip_df = pd.DataFrame()
+    if not chip_raw.empty:
+      # holding_shares_level 1~9 代表 <= 50張的散戶
+      # 計算每週散戶持股比例總和
+      chip_raw["percent"] = pd.to_numeric(
+          chip_raw["percent"], errors="coerce"
+      )
+      chip_raw["holding_shares_level"] = pd.to_numeric(
+          chip_raw["holding_shares_level"], errors="coerce"
       )
 
-      # 散戶持股 (1-9 級別，即 <=50張)
-      retail_shares = group[group[level_col].between(1, 9)][shares_col].sum()
-      retail_ratio = (
-          (retail_shares / tot_shares) * 100 if tot_shares > 0 else 0
+      retail_df = chip_raw[chip_raw["holding_shares_level"].between(1, 9)]
+      chip_summary = (
+          retail_df.groupby("date")["percent"].sum().reset_index()
       )
-
-      chip_summary.append({
-          "Date": d,
-          "Retail_Ratio": round(retail_ratio, 2),
-      })
-
-    chip_df = pd.DataFrame(chip_summary)
-    if not chip_df.empty:
-      chip_df = chip_df.sort_values("Date")
+      chip_summary.columns = ["Date", "Retail_Ratio"]
+      chip_summary["Date"] = pd.to_datetime(chip_summary["Date"])
+      chip_df = chip_summary.sort_values("Date")
 
     # 處理股價 Close 欄位
     if isinstance(price_df.columns, pd.MultiIndex):
@@ -193,17 +165,17 @@ if check_password():
         secondary_y=False,
     )
 
-    # 折線二：橘紅色 散戶持倉% (右 Y 軸) - 加入 connectgaps=True 確保每週資料點完美連線！
+    # 折線二：橘紅色 散戶持倉% (右 Y 軸) - 完整歷史連線！
     if not chip_df.empty:
       fig.add_trace(
           io_plotly.Scatter(
               x=chip_df["Date"],
               y=chip_df["Retail_Ratio"],
               name="散戶持倉比(%)",
-              mode="lines+markers",  # 加上資料節點標示
+              mode="lines+markers",
               line=dict(color="#FF4D4D", width=3),
               marker=dict(size=6, color="#FF4D4D"),
-              connectgaps=True,  # 跨日期自動連線
+              connectgaps=True,  # 自動跨週連接成滑順折線
               hovertemplate="%{x|%Y-%m-%d}<br>散戶持倉: %{y:.2f}%",
           ),
           secondary_y=True,
