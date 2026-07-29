@@ -12,21 +12,13 @@ st.set_page_config(
     page_title="台股籌碼與股價對照系統", page_icon="📈", layout="wide"
 )
 
-# 注入自訂 CSS，調整介面字體大小
+# 注入 CSS 調整欄位樣式
 st.markdown(
     """
     <style>
-    .stTextInput label, .stDateInput label {
-        font-size: 18px !important;
-        font-weight: bold !important;
-    }
-    .stTextInput input, .stDateInput input {
-        font-size: 18px !important;
-        font-weight: bold !important;
-    }
-    h1 {
-        font-size: 28px !important;
-    }
+    .stTextInput label, .stDateInput label { font-size: 18px !important; font-weight: bold !important; }
+    .stTextInput input, .stDateInput input { font-size: 18px !important; font-weight: bold !important; }
+    h1 { font-size: 28px !important; }
     </style>
 """,
     unsafe_allow_html=True,
@@ -78,14 +70,13 @@ def check_password():
 # 🚀 2. 主程式
 # ----------------------------------------------------
 if check_password():
-  st.title("📈 台股每日股價 vs 散戶持倉籌碼對照圖")
+  st.title("📈 台股每日股價 vs 散戶持倉趨勢對照圖")
 
-  # 📥 介面輸入欄位
   col1, col2, col3 = st.columns([2, 1.5, 1.5])
 
   with col1:
     stock_id = st.text_input(
-        "【欄位二】股票代號（範例: 2330）", value="2330"
+        "【欄位二】股票代號（範例: 2316）", value="2316"
     ).strip()
 
   default_start = datetime.now().date() - timedelta(days=90)
@@ -98,10 +89,10 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 每日散戶持倉籌碼流向數據擷取
+  # 📊 平滑累積型散戶籌碼趨勢計算
   # ----------------------------------------------------
   @st.cache_data(ttl=1800)
-  def fetch_daily_retail_flow(stock_code, s_date, e_date):
+  def fetch_daily_retail_cumsum(stock_code, s_date, e_date):
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
@@ -123,14 +114,17 @@ if check_password():
         summary = df.groupby("date")["retail_net"].sum().reset_index()
         summary.columns = ["Date", "Retail_Flow"]
         summary["Date"] = pd.to_datetime(summary["Date"])
-        return summary.sort_values("Date")
+        summary = summary.sort_values("Date")
+
+        # 關鍵精髓：進行「累積加總」，產生平滑不鋸齒的真實趨勢折線！
+        summary["Retail_Cumsum"] = summary["Retail_Flow"].cumsum()
+        return summary
     except Exception:
       pass
     return pd.DataFrame()
 
   try:
     with st.spinner("正在讀取每日股價與散戶籌碼動向..."):
-      # 1. 股價資料
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -141,8 +135,7 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
-      # 2. 每日散戶持倉籌碼動向
-      retail_df = fetch_daily_retail_flow(stock_id, start_date, end_date)
+      retail_df = fetch_daily_retail_cumsum(stock_id, start_date, end_date)
 
   except Exception as e:
     st.error(f"資料讀取失敗：{e}")
@@ -181,30 +174,29 @@ if check_password():
         secondary_y=False,
     )
 
-    # 折線二：橘紅色 散戶持倉籌碼動向 (右 Y 軸)
-    if "Retail_Flow" in plot_df.columns and not plot_df[
-        "Retail_Flow"
+    # 折線二：橘紅色 散戶累積持倉動向 (右 Y 軸) - 平滑流暢不劇烈跳動！
+    if "Retail_Cumsum" in plot_df.columns and not plot_df[
+        "Retail_Cumsum"
     ].isna().all():
       fig.add_trace(
           io_plotly.Scatter(
               x=plot_df.index,
-              y=plot_df["Retail_Flow"],
-              name="散戶持倉動向(張)",
-              mode="lines+markers",
+              y=plot_df["Retail_Cumsum"],
+              name="散戶持倉趨勢(張)",
+              mode="lines",
               line=dict(color="#FF4D4D", width=2.5),
-              marker=dict(size=5, color="#FF4D4D"),
               connectgaps=True,
               hovertemplate=(
-                  "%{x|%Y-%m-%d}<br>散戶買超/接盤: %{y:,.0f} 張"
+                  "%{x|%Y-%m-%d}<br>散戶累積加碼: %{y:,.0f} 張"
               ),
           ),
           secondary_y=True,
       )
 
-    # 圖表佈局：標題獨立居中，預留足夠空間，避免遮擋
+    # 圖表佈局
     fig.update_layout(
         title={
-            "text": f"<b>股票代號：{stock_id} 每日股價 vs 散戶持倉動向</b>",
+            "text": f"<b>股票代號：{stock_id} 每日股價 vs 散戶持倉趨勢</b>",
             "x": 0.5,
             "xanchor": "center",
             "y": 0.96,
@@ -225,7 +217,6 @@ if check_password():
         hoverlabel=dict(font_size=15),
     )
 
-    # 左 Y 軸：淺藍色 {股票價格}
     fig.update_yaxes(
         title_text="<b style='color:#3399FF;'>股票價格 (元)</b>",
         title_font=dict(size=18),
@@ -235,16 +226,14 @@ if check_password():
         gridcolor="#E2E2E2",
     )
 
-    # 右 Y 軸：橘紅色 {散戶持倉動向}
     fig.update_yaxes(
-        title_text="<b style='color:#FF4D4D;'>散戶持倉動向 (張)</b>",
+        title_text="<b style='color:#FF4D4D;'>散戶持倉累積趨勢 (張)</b>",
         title_font=dict(size=18),
         tickfont=dict(size=14),
         secondary_y=True,
         showgrid=False,
     )
 
-    # 下方 X 軸
     fig.update_xaxes(
         title_text=f"<b>日期期間：{start_date} ～ {end_date}</b>",
         title_font=dict(size=16),
@@ -253,7 +242,6 @@ if check_password():
         gridcolor="#E2E2E2",
     )
 
-    # 渲染圖表並禁用浮動工具列 (displayModeBar=False)，徹底解決文字被擋到的問題！
     st.plotly_chart(
         fig, use_container_width=True, config={"displayModeBar": False}
     )
