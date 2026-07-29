@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 import io
-from FinMind.data import DataLoader
 import pandas as pd
 import plotly.graph_objects as io_plotly
 from plotly.subplots import make_subplots
@@ -41,9 +40,7 @@ def check_password():
     st.title("🔒 系統授權鎖定")
     st.caption("請輸入每月授權密碼以存取圖表分析。")
 
-    user_pwd = st.text_input(
-        "【欄位一】請輸入授權密碼：", type="password"
-    )
+    user_pwd = st.text_input("【欄位一】請輸入授權密碼：", type="password")
 
     if st.button("解鎖並進入系統", type="primary"):
       if user_pwd == CORRECT_PASSWORD:
@@ -81,18 +78,22 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 抓取歷史籌碼資料 (使用 FinMind API)
+  # 📊 透過 FinMind REST API 直接抓取歷史籌碼
   # ----------------------------------------------------
   @st.cache_data(ttl=3600)
-  def fetch_chip_history(stock_code, s_date, e_date):
-    dl = DataLoader()
-    # 抓取股權分散表歷史資料
-    df_chip = dl.taiwan_stock_holding_shares_per(
-        stock_id=stock_code,
-        start_date=s_date.strftime("%Y-%m-%d"),
-        end_date=e_date.strftime("%Y-%m-%d"),
-    )
-    return df_chip
+  def fetch_finmind_chip(stock_code, s_date, e_date):
+    url = "https://api.finmindtrade.com/api/v4/data"
+    parameter = {
+        "dataset": "TaiwanStockHoldingSharesPer",
+        "data_id": stock_code,
+        "start_date": s_date.strftime("%Y-%m-%d"),
+        "end_date": e_date.strftime("%Y-%m-%d"),
+    }
+    resp = requests.get(url, params=parameter, timeout=20)
+    data = resp.json()
+    if data.get("msg") == "success":
+      return pd.DataFrame(data["data"])
+    return pd.DataFrame()
 
   try:
     with st.spinner("正在抓取歷史籌碼與股價資料..."):
@@ -108,8 +109,8 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
-      # 2. 抓取籌碼歷史 (FinMind)
-      chip_raw = fetch_chip_history(stock_id, start_date, end_date)
+      # 2. 抓取歷史籌碼 API
+      chip_raw = fetch_finmind_chip(stock_id, start_date, end_date)
 
   except Exception as e:
     st.error(f"資料讀取失敗：{e}")
@@ -121,14 +122,10 @@ if check_password():
   if price_df.empty:
     st.warning(f"❌ 查無股票代號【{stock_id}】的股價資料！")
   else:
-    # 處理 FinMind 籌碼數據
     chip_df = pd.DataFrame()
     if not chip_raw.empty:
-      # holding_shares_level 1~9 代表 <= 50張的散戶
-      # 計算每週散戶持股比例總和
-      chip_raw["percent"] = pd.to_numeric(
-          chip_raw["percent"], errors="coerce"
-      )
+      # holding_shares_level 1~9 代表 <= 50張散戶
+      chip_raw["percent"] = pd.to_numeric(chip_raw["percent"], errors="coerce")
       chip_raw["holding_shares_level"] = pd.to_numeric(
           chip_raw["holding_shares_level"], errors="coerce"
       )
@@ -165,7 +162,7 @@ if check_password():
         secondary_y=False,
     )
 
-    # 折線二：橘紅色 散戶持倉% (右 Y 軸) - 完整歷史連線！
+    # 折線二：橘紅色 散戶持倉% (右 Y 軸)
     if not chip_df.empty:
       fig.add_trace(
           io_plotly.Scatter(
@@ -175,7 +172,7 @@ if check_password():
               mode="lines+markers",
               line=dict(color="#FF4D4D", width=3),
               marker=dict(size=6, color="#FF4D4D"),
-              connectgaps=True,  # 自動跨週連接成滑順折線
+              connectgaps=True,
               hovertemplate="%{x|%Y-%m-%d}<br>散戶持倉: %{y:.2f}%",
           ),
           secondary_y=True,
