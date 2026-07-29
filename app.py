@@ -112,29 +112,55 @@ if st.session_state["authenticated"]:
 
 
 # ----------------------------------------------------
-# 🏷️ 股票名稱查詢器 (取得公司中文/簡短名稱)
+# 🏷️ 台股繁體中文名稱查詢器 (TWSE 官方 API + 備用字典)
 # ----------------------------------------------------
 @st.cache_data(ttl=86400)
-def get_stock_name(stock_code):
+def get_tw_stock_name(stock_code):
+  # A. 優先聯網查詢證交所 OpenAPI 官方中文清單
   try:
-    ticker_obj = yf.Ticker(f"{stock_code}.TW")
-    info = ticker_obj.info
-    name = (
-        info.get("shortName")
-        or info.get("longName")
-        or info.get("displaySymbol")
-    )
-    if not name:
-      ticker_obj = yf.Ticker(f"{stock_code}.TWO")
-      info = ticker_obj.info
-      name = (
-          info.get("shortName")
-          or info.get("longName")
-          or info.get("displaySymbol")
-      )
-    return name if name else stock_code
+    url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+    resp = requests.get(url, timeout=5)
+    if resp.status_code == 200:
+      data = resp.json()
+      for item in data:
+        if item.get("Code") == stock_code:
+          return item.get("Name")
   except Exception:
-    return stock_code
+    pass
+
+  # B. 若 OpenAPI 逾時，使用內建萬用繁體中文字典
+  fallback_names = {
+      "2330": "台積電",
+      "2317": "鴻海",
+      "2454": "聯發科",
+      "2618": "長榮航",
+      "2603": "長榮",
+      "2609": "陽明",
+      "2615": "萬海",
+      "2646": "星宇航空",
+      "2316": "楠梓電",
+      "2308": "台達電",
+      "2382": "廣達",
+      "3231": "緯創",
+      "2356": "英業達",
+      "2412": "中華電",
+      "2881": "富邦金",
+      "2882": "國泰金",
+      "2891": "中信金",
+  }
+  if stock_code in fallback_names:
+    return fallback_names[stock_code]
+
+  # C. 最後嘗試請求 FinMind 取得中文名稱
+  try:
+    fm_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo&data_id={stock_code}"
+    res = requests.get(fm_url, timeout=5).json()
+    if res.get("data"):
+      return res["data"][0]["stock_name"]
+  except Exception:
+    pass
+
+  return stock_code
 
 
 # ----------------------------------------------------
@@ -147,7 +173,7 @@ if check_password():
 
   with col1:
     stock_id = st.text_input(
-        "【欄位二】股票代號（範例: 2316）", value="2316"
+        "【欄位二】股票代號（範例: 2618）", value="2618"
     ).strip()
 
   default_start = datetime.now().date() - timedelta(days=90)
@@ -194,10 +220,11 @@ if check_password():
     return pd.DataFrame()
 
   try:
-    with st.spinner("正在讀取每日股價、公司名稱與散戶籌碼動向..."):
-      # 1. 下載股價與獲取股票名稱
-      stock_name = get_stock_name(stock_id)
+    with st.spinner("正在讀取每日股價、公司中文名稱與散戶籌碼動向..."):
+      # 1. 獲取股票繁體中文名稱
+      stock_name = get_tw_stock_name(stock_id)
 
+      # 2. 下載股價
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -208,7 +235,7 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
-      # 2. 籌碼資料
+      # 3. 籌碼資料
       retail_df = fetch_daily_retail_cumsum(stock_id, start_date, end_date)
 
   except Exception as e:
@@ -267,7 +294,7 @@ if check_password():
           secondary_y=True,
       )
 
-    # 組合顯示股票名稱標題 (例如: 楠梓電 (2316))
+    # 組合顯示股票繁體中文名稱標題 (例如: 長榮航 (2618))
     display_title = (
         f"{stock_name} ({stock_id})" if stock_name != stock_id else stock_id
     )
