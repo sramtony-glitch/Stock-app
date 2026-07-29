@@ -13,7 +13,7 @@ st.set_page_config(
     page_title="台股籌碼與股價對照系統", page_icon="📈", layout="wide"
 )
 
-# 注入 Viewport 網頁頭部設定，允許手機/iPad 兩手指開合放大整個網頁
+# 注入 CSS
 st.markdown(
     """
     <head>
@@ -23,17 +23,14 @@ st.markdown(
     .stTextInput label, .stDateInput label { font-size: 18px !important; font-weight: bold !important; }
     .stTextInput input, .stDateInput input { font-size: 18px !important; font-weight: bold !important; }
     h1 { font-size: 28px !important; }
-    /* 解除圖表對觸控手勢的獨佔，讓雙指放大作用在整個頁面上 */
-    .js-plotly-plot .plotly .main-svg {
-        touch-action: auto !important;
-    }
+    .js-plotly-plot .plotly .main-svg { touch-action: auto !important; }
     </style>
 """,
     unsafe_allow_html=True,
 )
 
 # ----------------------------------------------------
-# 🔐 1. 欄位一：每月密碼驗證 (持久化記憶：30天免重複輸入)
+# 🔐 1. 欄位一：每月密碼驗證 (30天記憶)
 # ----------------------------------------------------
 current_time = datetime.now()
 year_month_key = current_time.strftime("%Y_%m")
@@ -113,6 +110,33 @@ if st.session_state["authenticated"]:
       height=0,
   )
 
+
+# ----------------------------------------------------
+# 🏷️ 股票名稱查詢器 (取得公司中文/簡短名稱)
+# ----------------------------------------------------
+@st.cache_data(ttl=86400)
+def get_stock_name(stock_code):
+  try:
+    ticker_obj = yf.Ticker(f"{stock_code}.TW")
+    info = ticker_obj.info
+    name = (
+        info.get("shortName")
+        or info.get("longName")
+        or info.get("displaySymbol")
+    )
+    if not name:
+      ticker_obj = yf.Ticker(f"{stock_code}.TWO")
+      info = ticker_obj.info
+      name = (
+          info.get("shortName")
+          or info.get("longName")
+          or info.get("displaySymbol")
+      )
+    return name if name else stock_code
+  except Exception:
+    return stock_code
+
+
 # ----------------------------------------------------
 # 🚀 2. 主程式
 # ----------------------------------------------------
@@ -170,7 +194,10 @@ if check_password():
     return pd.DataFrame()
 
   try:
-    with st.spinner("正在讀取每日股價與散戶籌碼動向..."):
+    with st.spinner("正在讀取每日股價、公司名稱與散戶籌碼動向..."):
+      # 1. 下載股價與獲取股票名稱
+      stock_name = get_stock_name(stock_id)
+
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -181,6 +208,7 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
+      # 2. 籌碼資料
       retail_df = fetch_daily_retail_cumsum(stock_id, start_date, end_date)
 
   except Exception as e:
@@ -239,10 +267,16 @@ if check_password():
           secondary_y=True,
       )
 
-    # 圖表佈局：固定 X/Y 軸不讓圖表單獨被拉走，維持整體安定性
+    # 組合顯示股票名稱標題 (例如: 楠梓電 (2316))
+    display_title = (
+        f"{stock_name} ({stock_id})" if stock_name != stock_id else stock_id
+    )
+
     fig.update_layout(
         title={
-            "text": f"<b>股票代號：{stock_id} 每日股價 vs 散戶持倉趨勢</b>",
+            "text": (
+                f"<b>【{display_title}】 每日股價 vs 散戶持倉趨勢</b>"
+            ),
             "x": 0.5,
             "xanchor": "center",
             "y": 0.96,
@@ -261,9 +295,9 @@ if check_password():
             font=dict(size=15),
         ),
         hoverlabel=dict(font_size=15),
-        xaxis=dict(fixedrange=True),  # 鎖定 X 軸單獨位移
-        yaxis=dict(fixedrange=True),  # 鎖定左 Y 軸單獨位移
-        yaxis2=dict(fixedrange=True),  # 鎖定右 Y 軸單獨位移
+        xaxis=dict(fixedrange=True),
+        yaxis=dict(fixedrange=True),
+        yaxis2=dict(fixedrange=True),
     )
 
     fig.update_yaxes(
@@ -291,7 +325,6 @@ if check_password():
         gridcolor="#E2E2E2",
     )
 
-    # 禁用 Plotly 內部的獨立縮放，讓全網頁跟著雙指手勢一起放大縮小
     st.plotly_chart(
         fig,
         use_container_width=True,
