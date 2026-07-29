@@ -13,13 +13,17 @@ st.set_page_config(
     page_title="台股籌碼與股價對照系統", page_icon="📈", layout="wide"
 )
 
-# 注入 CSS 調整介面字體大小
+# 注入 CSS 調整欄位樣式與觸控手勢體驗
 st.markdown(
     """
     <style>
     .stTextInput label, .stDateInput label { font-size: 18px !important; font-weight: bold !important; }
     .stTextInput input, .stDateInput input { font-size: 18px !important; font-weight: bold !important; }
     h1 { font-size: 28px !important; }
+    /* 允許繪圖區支援雙指觸控手勢 */
+    .js-plotly-plot .plotly .main-svg {
+        touch-action: manipulation;
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -44,11 +48,9 @@ YEARLY_PASSWORDS = {
 
 CORRECT_PASSWORD = YEARLY_PASSWORDS.get(year_month_key, "stock2026")
 
-# 初始化 session state
 if "authenticated" not in st.session_state:
   st.session_state["authenticated"] = False
 
-# 檢查 URL query parameter 是否包含瀏覽器認證憑證
 query_params = st.query_params
 if (
     not st.session_state["authenticated"]
@@ -69,14 +71,12 @@ def check_password():
   if st.button("解鎖並進入系統", type="primary"):
     if user_pwd == CORRECT_PASSWORD:
       st.session_state["authenticated"] = True
-      # 將認證資訊寫入 URL 參數與 LocalStorage，讓瀏覽器記住 30 天
       st.query_params["auth_token"] = CORRECT_PASSWORD
       st.success("驗證成功！已自動記住認證狀態。")
       st.rerun()
     else:
       st.error("❌ 密碼錯誤，請向管理者索取當月密碼！")
 
-  # 嵌入 JS 自動檢查本地 localStorage 快取憑證
   components.html(
       f"""
         <script>
@@ -84,7 +84,6 @@ def check_password():
             const tokenTime = localStorage.getItem('stock_app_auth_time');
             const now = new Date().getTime();
             
-            // 檢查是否在大於 30 天內 (30 * 24 * 60 * 60 * 1000 ms)
             if (savedToken === '{CORRECT_PASSWORD}' && tokenTime && (now - parseInt(tokenTime) < 2592000000)) {{
                 const url = new URL(window.location.href);
                 if (!url.searchParams.has('auth_token')) {{
@@ -100,7 +99,6 @@ def check_password():
   return False
 
 
-# 如果認證成功，自動記錄到 LocalStorage 保持 30 天免輸入
 if st.session_state["authenticated"]:
   components.html(
       f"""
@@ -287,6 +285,9 @@ if check_password():
         gridcolor="#E2E2E2",
     )
 
+    # 開啟雙指縮放 (scrollZoom=True)，關閉阻礙視覺的工具列
     st.plotly_chart(
-        fig, use_container_width=True, config={"displayModeBar": False}
+        fig,
+        use_container_width=True,
+        config={"scrollZoom": True, "displayModeBar": False},
     )
