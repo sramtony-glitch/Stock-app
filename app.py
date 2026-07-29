@@ -12,20 +12,20 @@ st.set_page_config(
     page_title="台股籌碼與股價對照系統", page_icon="📈", layout="wide"
 )
 
-# 注入自訂 CSS，放大輸入欄位與標籤字體
+# 注入自訂 CSS，調整介面字體大小
 st.markdown(
     """
     <style>
     .stTextInput label, .stDateInput label {
-        font-size: 20px !important;
+        font-size: 18px !important;
         font-weight: bold !important;
     }
     .stTextInput input, .stDateInput input {
-        font-size: 20px !important;
+        font-size: 18px !important;
         font-weight: bold !important;
     }
     h1 {
-        font-size: 30px !important;
+        font-size: 28px !important;
     }
     </style>
 """,
@@ -175,7 +175,7 @@ if check_password():
             y=plot_df["Price"],
             name="股票價格",
             mode="lines",
-            line=dict(color="#3399FF", width=3.5),
+            line=dict(color="#3399FF", width=3),
             hovertemplate="%{x|%Y-%m-%d}<br>股價: $%{y:.2f}",
         ),
         secondary_y=False,
@@ -188,13 +188,11 @@ if check_password():
       fig.add_trace(
           io_plotly.Scatter(
               x=plot_df.index,
-              y=plot_df["Retail_Ratio"]
-              if "Retail_Ratio" in plot_df.columns
-              else plot_df["Retail_Flow"],
+              y=plot_df["Retail_Flow"],
               name="散戶持倉動向(張)",
               mode="lines+markers",
               line=dict(color="#FF4D4D", width=2.5),
-              marker=dict(size=6, color="#FF4D4D"),
+              marker=dict(size=5, color="#FF4D4D"),
               connectgaps=True,
               hovertemplate=(
                   "%{x|%Y-%m-%d}<br>散戶買超/接盤: %{y:,.0f} 張"
@@ -203,35 +201,35 @@ if check_password():
           secondary_y=True,
       )
 
-    # 圖表佈局修正：加大頂部間距與獨立圖例位置，防止 iPad 文字重疊
+    # 圖表佈局：標題獨立居中，預留足夠空間，避免遮擋
     fig.update_layout(
         title={
             "text": f"<b>股票代號：{stock_id} 每日股價 vs 散戶持倉動向</b>",
             "x": 0.5,
             "xanchor": "center",
-            "y": 0.98,
+            "y": 0.96,
             "yanchor": "top",
-            "font": {"size": 22},
+            "font": {"size": 20},
         },
         hovermode="x unified",
         autosize=True,
-        margin=dict(l=20, r=20, t=100, b=20),  # 上邊距由 60 加大至 100
+        margin=dict(l=15, r=15, t=90, b=20),
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.02,  # 將圖例往上移，開闢獨立區域
+            y=1.02,
             xanchor="center",
             x=0.5,
-            font=dict(size=16),
+            font=dict(size=15),
         ),
-        hoverlabel=dict(font_size=16),
+        hoverlabel=dict(font_size=15),
     )
 
     # 左 Y 軸：淺藍色 {股票價格}
     fig.update_yaxes(
         title_text="<b style='color:#3399FF;'>股票價格 (元)</b>",
-        title_font=dict(size=20),
-        tickfont=dict(size=15),
+        title_font=dict(size=18),
+        tickfont=dict(size=14),
         secondary_y=False,
         showgrid=True,
         gridcolor="#E2E2E2",
@@ -240,8 +238,8 @@ if check_password():
     # 右 Y 軸：橘紅色 {散戶持倉動向}
     fig.update_yaxes(
         title_text="<b style='color:#FF4D4D;'>散戶持倉動向 (張)</b>",
-        title_font=dict(size=20),
-        tickfont=dict(size=15),
+        title_font=dict(size=18),
+        tickfont=dict(size=14),
         secondary_y=True,
         showgrid=False,
     )
@@ -249,11 +247,13 @@ if check_password():
     # 下方 X 軸
     fig.update_xaxes(
         title_text=f"<b>日期期間：{start_date} ～ {end_date}</b>",
-        title_font=dict(size=18),
-        tickfont=dict(size=15),
+        title_font=dict(size=16),
+        tickfont=dict(size=14),
         showgrid=True,
         gridcolor="#E2E2E2",
     )
 
-    # 跨裝置滿版渲染
-    st.plotly_chart(fig, use_container_width=True)
+    # 渲染圖表並禁用浮動工具列 (displayModeBar=False)，徹底解決文字被擋到的問題！
+    st.plotly_chart(
+        fig, use_container_width=True, config={"displayModeBar": False}
+    )
