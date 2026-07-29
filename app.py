@@ -78,90 +78,49 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 籌碼資料擷取（FinMind + TDCC 雙備用機制）
+  # 📊 抓取 FinMind 歷史籌碼 API (精確解析欄位)
   # ----------------------------------------------------
   @st.cache_data(ttl=3600)
-  def get_chip_data(stock_code, s_date, e_date):
-    # 嘗試方法 A: FinMind API
+  def fetch_history_chip(stock_code, s_date, e_date):
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockHoldingSharesPer",
+        "data_id": stock_code,
+        "start_date": s_date.strftime("%Y-%m-%d"),
+        "end_date": e_date.strftime("%Y-%m-%d"),
+    }
     try:
-      url = "https://api.finmindtrade.com/api/v4/data"
-      params = {
-          "dataset": "TaiwanStockHoldingSharesPer",
-          "data_id": stock_code,
-          "start_date": s_date.strftime("%Y-%m-%d"),
-          "end_date": e_date.strftime("%Y-%m-%d"),
-      }
-      resp = requests.get(url, params=params, timeout=15)
-      res_json = resp.json()
+      resp = requests.get(url, params=params, timeout=20)
+      data = resp.json()
+      if data.get("msg") == "success" and data.get("data"):
+        df = pd.DataFrame(data["data"])
 
-      if res_json.get("msg") == "success" and len(res_json.get("data", [])) > 0:
-        df_fm = pd.DataFrame(res_json["data"])
-        df_fm["holding_shares_level"] = pd.to_numeric(
-            df_fm["holding_shares_level"], errors="coerce"
+        # 處理大小寫欄位相容性 (HoldingSharesLevel 或 holding_shares_level)
+        level_col = (
+            "HoldingSharesLevel"
+            if "HoldingSharesLevel" in df.columns
+            else "holding_shares_level"
         )
-        df_fm["percent"] = pd.to_numeric(df_fm["percent"], errors="coerce")
+        percent_col = "percent" if "percent" in df.columns else "Percent"
 
-        # 篩選 1~9 級（<= 50張散戶）
-        retail_fm = df_fm[df_fm["holding_shares_level"].between(1, 9)]
+        df[level_col] = pd.to_numeric(df[level_col], errors="coerce")
+        df[percent_col] = pd.to_numeric(df[percent_col], errors="coerce")
+
+        # 散戶級別：1~9 級 (<= 50張)
+        retail_df = df[df[level_col].between(1, 9)]
         summary = (
-            retail_fm.groupby("date")["percent"].sum().reset_index()
+            retail_df.groupby("date")[percent_col].sum().reset_index()
         )
         summary.columns = ["Date", "Retail_Ratio"]
         summary["Date"] = pd.to_datetime(summary["Date"])
         return summary.sort_values("Date")
     except Exception:
       pass
-
-    # 嘗試方法 B: 集保官網開放資料 API
-    try:
-      url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
-      headers = {
-          "User-Agent": (
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          )
-      }
-      res = requests.get(url, headers=headers, verify=False, timeout=15)
-      res.encoding = "utf-8"
-      df_tdcc = pd.read_csv(io.StringIO(res.text), dtype=str)
-
-      date_col, code_col, level_col, shares_col = (
-          df_tdcc.columns[0],
-          df_tdcc.columns[1],
-          df_tdcc.columns[2],
-          df_tdcc.columns[4],
-      )
-      df_tdcc[code_col] = df_tdcc[code_col].str.strip()
-      df_tdcc[level_col] = pd.to_numeric(df_tdcc[level_col], errors="coerce")
-      df_tdcc[shares_col] = pd.to_numeric(df_tdcc[shares_col], errors="coerce")
-
-      stock_tdcc = df_tdcc[df_tdcc[code_col] == stock_code].copy()
-      stock_tdcc["Date_Obj"] = pd.to_datetime(
-          stock_tdcc[date_col], format="%Y%m%d", errors="coerce"
-      )
-
-      chip_summary = []
-      for d, group in stock_tdcc.groupby("Date_Obj"):
-        total_row = group[group[level_col] == 17]
-        tot_shares = (
-            total_row[shares_col].values[0]
-            if not total_row.empty
-            else group[shares_col].sum()
-        )
-        retail_shares = group[group[level_col].between(1, 9)][shares_col].sum()
-        retail_ratio = (
-            (retail_shares / tot_shares) * 100 if tot_shares > 0 else 0
-        )
-        chip_summary.append(
-            {"Date": d, "Retail_Ratio": round(retail_ratio, 2)}
-        )
-
-      return pd.DataFrame(chip_summary)
-    except Exception:
-      return pd.DataFrame()
+    return pd.DataFrame()
 
   try:
-    with st.spinner("正在抓取歷史籌碼與股價資料..."):
-      # 1. 股價資料
+    with st.spinner("正在讀取歷史股價與散戶籌碼資料..."):
+      # 1. 下載 Yahoo Finance 股價
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -172,15 +131,15 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
-      # 2. 籌碼資料
-      chip_df = get_chip_data(stock_id, start_date, end_date)
+      # 2. 下載歷史散戶籌碼比率
+      chip_df = fetch_history_chip(stock_id, start_date, end_date)
 
   except Exception as e:
     st.error(f"資料讀取失敗：{e}")
     st.stop()
 
   # ----------------------------------------------------
-  # 📈 處理與疊加繪圖
+  # 📈 繪製雙 Y 軸 疊加折線圖
   # ----------------------------------------------------
   if price_df.empty:
     st.warning(f"❌ 查無股票代號【{stock_id}】的股價資料！")
@@ -191,28 +150,13 @@ if check_password():
     else:
       price_series = price_df["Close"]
 
-    # 建立整合 DateFrame
-    combined_df = pd.DataFrame({"Price": price_series})
-    combined_df.index = pd.to_datetime(combined_df.index)
-
-    if not chip_df.empty:
-      chip_df["Date"] = pd.to_datetime(chip_df["Date"])
-      chip_df = chip_df.set_index("Date")
-
-      # 將每週籌碼合併至每日股價，並用 ffill (前向填補) 補齊每天的散戶持股%
-      combined_df = combined_df.join(chip_df, how="left")
-      combined_df["Retail_Ratio"] = combined_df["Retail_Ratio"].ffill().bfill()
-
-    # ----------------------------------------------------
-    # 🎨 繪製雙 Y 軸 疊加折線圖
-    # ----------------------------------------------------
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # 折線一：淺藍色 股票價格 (左 Y 軸)
+    # 折線一：淺藍色 股票價格 (左 Y 軸) - 每日頻率
     fig.add_trace(
         io_plotly.Scatter(
-            x=combined_df.index,
-            y=combined_df["Price"],
+            x=price_series.index,
+            y=price_series.values,
             name="股票價格",
             mode="lines",
             line=dict(color="#3399FF", width=3),
@@ -221,18 +165,17 @@ if check_password():
         secondary_y=False,
     )
 
-    # 折線二：橘紅色 散戶持倉% (右 Y 軸) - 確保 100% 呈現折線！
-    if "Retail_Ratio" in combined_df.columns and not combined_df[
-        "Retail_Ratio"
-    ].isna().all():
+    # 折線二：橘紅色 散戶持倉% (右 Y 軸) - 每週點對點真實折線！
+    if not chip_df.empty:
       fig.add_trace(
           io_plotly.Scatter(
-              x=combined_df.index,
-              y=combined_df["Retail_Ratio"],
+              x=chip_df["Date"],
+              y=chip_df["Retail_Ratio"],
               name="散戶持倉比(%)",
               mode="lines+markers",
               line=dict(color="#FF4D4D", width=3),
-              marker=dict(size=4, color="#FF4D4D"),
+              marker=dict(size=7, color="#FF4D4D"),
+              connectgaps=True,  # 將每週的點自動用斜線連起來
               hovertemplate="%{x|%Y-%m-%d}<br>散戶持倉: %{y:.2f}%",
           ),
           secondary_y=True,
