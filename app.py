@@ -160,7 +160,7 @@ def get_tw_stock_name(stock_code):
 # 🚀 2. 主程式
 # ----------------------------------------------------
 if check_password():
-  st.title("📈 台股每日 K 線圖 vs 散戶持倉趨勢對照圖")
+  st.title("📈 台股每日 K 線圖 vs 散戶交易量與成本對照圖")
 
   col1, col2, col3 = st.columns([2, 1.5, 1.5])
 
@@ -179,10 +179,10 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 平滑累積型散戶籌碼趨勢計算
+  # 📊 依公式精算：散戶每日量 (交易總量 - 三大法人買量)
   # ----------------------------------------------------
   @st.cache_data(ttl=1800)
-  def fetch_daily_retail_cumsum(stock_code, s_date, e_date):
+  def fetch_retail_volume_and_cost(stock_code, s_date, e_date):
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
@@ -195,29 +195,22 @@ if check_password():
       data = resp.json()
       if data.get("msg") == "success" and data.get("data"):
         df = pd.DataFrame(data["data"])
-        df["buy"] = pd.to_numeric(df["buy"], errors="coerce")
-        df["sell"] = pd.to_numeric(df["sell"], errors="coerce")
+        df["buy"] = pd.to_numeric(df["buy"], errors="coerce") / 1000.0  # 張數
 
-        df["inst_net"] = (df["buy"] - df["sell"]) / 1000.0
-        df["retail_net"] = -df["inst_net"]
-
-        summary = df.groupby("date")["retail_net"].sum().reset_index()
-        summary.columns = ["Date", "Retail_Flow"]
-        summary["Date"] = pd.to_datetime(summary["Date"])
-        summary = summary.sort_values("Date")
-
-        summary["Retail_Cumsum"] = summary["Retail_Flow"].cumsum()
-        return summary
+        # 加總三大法人當天買進總量 (張)
+        inst_buy = df.groupby("date")["buy"].sum().reset_index()
+        inst_buy.columns = ["Date", "Inst_Buy_Qty"]
+        inst_buy["Date"] = pd.to_datetime(inst_buy["Date"])
+        return inst_buy.sort_values("Date")
     except Exception:
       pass
     return pd.DataFrame()
 
   try:
-    with st.spinner("正在讀取日 K 線與散戶籌碼動向..."):
-      # 1. 獲取股票繁體中文名稱
+    with st.spinner("正在計算散戶交易量與成本數據..."):
       stock_name = get_tw_stock_name(stock_id)
 
-      # 2. 下載完整的 OHLC (開高低收) 股價資料
+      # 1. 股價與總交易量 (yfinance)
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -228,47 +221,55 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
-      # 3. 籌碼資料
-      retail_df = fetch_daily_retail_cumsum(stock_id, start_date, end_date)
+      # 2. 三大法人買進量
+      inst_df = fetch_retail_volume_and_cost(stock_id, start_date, end_date)
 
   except Exception as e:
     st.error(f"資料讀取失敗：{e}")
     st.stop()
 
   # ----------------------------------------------------
-  # 📈 繪製雙 Y 軸 疊加圖表 (日 K 線 + 散戶籌碼折線)
+  # 📈 繪製雙 Y 軸 疊加圖表 (日 K 線 + 散戶量公式折線)
   # ----------------------------------------------------
   if price_df.empty:
     st.warning(f"❌ 查無股票代號【{stock_id}】的股價資料！")
   else:
-    # 處理 yfinance 可能返回 MultiIndex 的欄位結構
     if isinstance(price_df.columns, pd.MultiIndex):
       open_s = price_df["Open"][ticker]
       high_s = price_df["High"][ticker]
       low_s = price_df["Low"][ticker]
       close_s = price_df["Close"][ticker]
+      vol_s = price_df["Volume"][ticker] / 1000.0  # 轉為張數
     else:
       open_s = price_df["Open"]
       high_s = price_df["High"]
       low_s = price_df["Low"]
       close_s = price_df["Close"]
+      vol_s = price_df["Volume"] / 1000.0
 
     plot_df = pd.DataFrame({
         "Open": open_s,
         "High": high_s,
         "Low": low_s,
         "Close": close_s,
+        "Total_Volume": vol_s,
     })
     plot_df.index = pd.to_datetime(plot_df.index)
 
-    if not retail_df.empty:
-      retail_df = retail_df.set_index("Date")
-      plot_df = plot_df.join(retail_df, how="left")
+    if not inst_df.empty:
+      inst_df = inst_df.set_index("Date")
+      plot_df = plot_df.join(inst_df, how="left")
+
+    # 執行新公式算式：散戶量 = 交易總量 - 三大法人買進量
+    plot_df["Inst_Buy_Qty"] = plot_df["Inst_Buy_Qty"].fillna(0)
+    plot_df["Retail_Volume"] = plot_df["Total_Volume"] - plot_df["Inst_Buy_Qty"]
+    plot_df["Retail_Volume"] = plot_df["Retail_Volume"].apply(
+        lambda x: max(x, 0)
+    )
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     # 🟢🔴 1. 繪製台股標準日 K 線圖 (左 Y 軸)
-    # 台灣標準：上漲 (increasing) = 紅色 #FF3333，下跌 (decreasing) = 綠色 #00B359
     fig.add_trace(
         io_plotly.Candlestick(
             x=plot_df.index,
@@ -278,33 +279,30 @@ if check_password():
             close=plot_df["Close"],
             name="日 K 線",
             increasing_line_color="#FF3333",
-            increasing_fillcolor="#FF3333",  # 上漲紅 K 實體
+            increasing_fillcolor="#FF3333",
             decreasing_line_color="#00B359",
-            decreasing_fillcolor="#00B359",  # 下跌綠 K 實體
+            decreasing_fillcolor="#00B359",
         ),
         secondary_y=False,
     )
 
-    # 🟠 2. 繪製橘紅色 散戶累積持倉動向 (右 Y 軸)
-    if "Retail_Cumsum" in plot_df.columns and not plot_df[
-        "Retail_Cumsum"
-    ].isna().all():
-      fig.add_trace(
-          io_plotly.Scatter(
-              x=plot_df.index,
-              y=plot_df["Retail_Cumsum"],
-              name="散戶持倉趨勢(張)",
-              mode="lines",
-              line=dict(color="#FF8C00", width=2.5),  # 調整為亮眼橘色
-              connectgaps=True,
-              hovertemplate=(
-                  "%{x|%Y-%m-%d}<br>散戶累積加碼: %{y:,.0f} 張"
-              ),
-          ),
-          secondary_y=True,
-      )
+    # 🟠 2. 繪製橘紅色【新公式：散戶買進張數】(右 Y 軸)
+    fig.add_trace(
+        io_plotly.Scatter(
+            x=plot_df.index,
+            y=plot_df["Retail_Volume"],
+            name="散戶買進量(張)",
+            mode="lines+markers",
+            line=dict(color="#FF8C00", width=2.5),
+            marker=dict(size=5, color="#FF8C00"),
+            connectgaps=True,
+            hovertemplate=(
+                "%{x|%Y-%m-%d}<br>散戶估算買張: %{y:,.0f} 張"
+            ),
+        ),
+        secondary_y=True,
+    )
 
-    # 組合顯示股票繁體中文名稱標題
     display_title = (
         f"{stock_name} ({stock_id})" if stock_name != stock_id else stock_id
     )
@@ -312,13 +310,13 @@ if check_password():
     fig.update_layout(
         title={
             "text": (
-                f"<b>【{display_title}】 每日 K 線 vs 散戶持倉趨勢</b>"
+                f"<b>【{display_title}】 日 K 線 vs 散戶估算買張(總量-法人買)</b>"
             ),
             "x": 0.5,
             "xanchor": "center",
             "y": 0.96,
             "yanchor": "top",
-            "font": {"size": 20},
+            "font": {"size": 19},
         },
         hovermode="x unified",
         autosize=True,
@@ -332,7 +330,6 @@ if check_password():
             font=dict(size=15),
         ),
         hoverlabel=dict(font_size=15),
-        # 預設過濾週末無交易日，讓 K 棒連接更流暢
         xaxis=dict(
             fixedrange=True,
             type="date",
@@ -342,7 +339,6 @@ if check_password():
         yaxis2=dict(fixedrange=True),
     )
 
-    # 左 Y 軸：日 K 線價格
     fig.update_yaxes(
         title_text="<b>股票價格 (元)</b>",
         title_font=dict(size=18),
@@ -352,16 +348,14 @@ if check_password():
         gridcolor="#E2E2E2",
     )
 
-    # 右 Y 軸：橘色 {散戶持倉趨勢}
     fig.update_yaxes(
-        title_text="<b style='color:#FF8C00;'>散戶持倉累積趨勢 (張)</b>",
+        title_text="<b style='color:#FF8C00;'>散戶估算買張 (張)</b>",
         title_font=dict(size=18),
         tickfont=dict(size=14),
         secondary_y=True,
         showgrid=False,
     )
 
-    # 下方 X 軸
     fig.update_xaxes(
         title_text=f"<b>日期期間：{start_date} ～ {end_date}</b>",
         title_font=dict(size=16),
