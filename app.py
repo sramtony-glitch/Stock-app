@@ -12,6 +12,29 @@ st.set_page_config(
     page_title="台股籌碼與股價對照系統", page_icon="📈", layout="wide"
 )
 
+# 注入自訂 CSS，全面放大輸入欄位與標籤字體
+st.markdown(
+    """
+    <style>
+    /* 放大輸入欄位上方標籤 */
+    .stTextInput label, .stDateInput label {
+        font-size: 20px !important;
+        font-weight: bold !important;
+    }
+    /* 放大輸入框內的文字 */
+    .stTextInput input, .stDateInput input {
+        font-size: 20px !important;
+        font-weight: bold !important;
+    }
+    /* 放大主標題與文字 */
+    h1 {
+        font-size: 32px !important;
+    }
+    </style>
+""",
+    unsafe_allow_html=True,
+)
+
 # ----------------------------------------------------
 # 🔐 1. 欄位一：每月密碼驗證
 # ----------------------------------------------------
@@ -78,7 +101,7 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 每日散戶持倉籌碼轉換引擎 (以三大法人反向對作精算)
+  # 📊 每日散戶持倉籌碼流向數據擷取
   # ----------------------------------------------------
   @st.cache_data(ttl=1800)
   def fetch_daily_retail_flow(stock_code, s_date, e_date):
@@ -97,25 +120,20 @@ if check_password():
         df["buy"] = pd.to_numeric(df["buy"], errors="coerce")
         df["sell"] = pd.to_numeric(df["sell"], errors="coerce")
 
-        # 法人賣超 = 散戶接盤買超，取反向代表散戶每日進出張數
-        df["inst_net"] = (df["buy"] - df["sell"]) / 1000.0  # 張數
-        df["retail_net"] = -df["inst_net"]  # 轉為散戶每日動向
+        df["inst_net"] = (df["buy"] - df["sell"]) / 1000.0
+        df["retail_net"] = -df["inst_net"]
 
         summary = df.groupby("date")["retail_net"].sum().reset_index()
         summary.columns = ["Date", "Retail_Flow"]
         summary["Date"] = pd.to_datetime(summary["Date"])
-
-        # 計算散戶累積持倉變化流向 (張)
-        summary = summary.sort_values("Date")
-        summary["Retail_Cumsum"] = summary["Retail_Flow"].cumsum()
-        return summary
+        return summary.sort_values("Date")
     except Exception:
       pass
     return pd.DataFrame()
 
   try:
     with st.spinner("正在讀取每日股價與散戶籌碼動向..."):
-      # 1. 股價資料 (Yahoo Finance)
+      # 1. 股價資料
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -126,7 +144,7 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
-      # 2. 每日散戶持倉籌碼流向
+      # 2. 每日散戶持倉籌碼動向
       retail_df = fetch_daily_retail_flow(stock_id, start_date, end_date)
 
   except Exception as e:
@@ -139,7 +157,6 @@ if check_password():
   if price_df.empty:
     st.warning(f"❌ 查無股票代號【{stock_id}】的股價資料！")
   else:
-    # 提取股價 Close 欄位
     if isinstance(price_df.columns, pd.MultiIndex):
       price_series = price_df["Close"][ticker]
     else:
@@ -161,13 +178,13 @@ if check_password():
             y=plot_df["Price"],
             name="股票價格",
             mode="lines",
-            line=dict(color="#3399FF", width=3),
+            line=dict(color="#3399FF", width=3.5),
             hovertemplate="%{x|%Y-%m-%d}<br>股價: $%{y:.2f}",
         ),
         secondary_y=False,
     )
 
-    # 折線二：橘紅色 散戶持倉籌碼動向 (右 Y 軸) - 每日數據起伏！
+    # 折線二：橘紅色 散戶持倉籌碼動向 (右 Y 軸)
     if "Retail_Flow" in plot_df.columns and not plot_df[
         "Retail_Flow"
     ].isna().all():
@@ -177,8 +194,8 @@ if check_password():
               y=plot_df["Retail_Flow"],
               name="散戶持倉動向(張)",
               mode="lines+markers",
-              line=dict(color="#FF4D4D", width=2),
-              marker=dict(size=5, color="#FF4D4D"),
+              line=dict(color="#FF4D4D", width=2.5),
+              marker=dict(size=6, color="#FF4D4D"),
               connectgaps=True,
               hovertemplate=(
                   "%{x|%Y-%m-%d}<br>散戶買超/接盤: %{y:,.0f} 張"
@@ -187,36 +204,51 @@ if check_password():
           secondary_y=True,
       )
 
-    # 圖表佈局設定
+    # 圖表佈局與大字體設定
     fig.update_layout(
-        title=f"<b>股票代號：{stock_id} 每日股價 vs 散戶持倉動向</b>",
-        title_x=0.4,
+        title={
+            "text": f"<b>股票代號：{stock_id} 每日股價 vs 散戶持倉動向</b>",
+            "x": 0.4,
+            "font": {"size": 26},  # 大標題字體
+        },
         hovermode="x unified",
         autosize=True,
-        margin=dict(l=20, r=20, t=50, b=20),
+        margin=dict(l=20, r=20, t=60, b=20),
         legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(size=18),  # 圖例字體
         ),
+        hoverlabel=dict(font_size=18),  # 懸停提示框字體
     )
 
-    # 左 Y 軸：淺藍色 {股票價格}
+    # 左 Y 軸：淺藍色 {股票價格} 大字體
     fig.update_yaxes(
         title_text="<b style='color:#3399FF;'>股票價格 (元)</b>",
+        title_font=dict(size=22),
+        tickfont=dict(size=16),
         secondary_y=False,
         showgrid=True,
         gridcolor="#E2E2E2",
     )
 
-    # 右 Y 軸：橘紅色 {散戶持倉動向}
+    # 右 Y 軸：橘紅色 {散戶持倉動向} 大字體
     fig.update_yaxes(
         title_text="<b style='color:#FF4D4D;'>散戶持倉動向 (張)</b>",
+        title_font=dict(size=22),
+        tickfont=dict(size=16),
         secondary_y=True,
         showgrid=False,
     )
 
-    # 下方 X 軸
+    # 下方 X 軸：日期大字體
     fig.update_xaxes(
         title_text=f"<b>日期期間：{start_date} ～ {end_date}</b>",
+        title_font=dict(size=20),
+        tickfont=dict(size=16),
         showgrid=True,
         gridcolor="#E2E2E2",
     )
