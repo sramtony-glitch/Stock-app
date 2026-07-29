@@ -12,23 +12,20 @@ st.set_page_config(
     page_title="台股籌碼與股價對照系統", page_icon="📈", layout="wide"
 )
 
-# 注入自訂 CSS，全面放大輸入欄位與標籤字體
+# 注入自訂 CSS，放大輸入欄位與標籤字體
 st.markdown(
     """
     <style>
-    /* 放大輸入欄位上方標籤 */
     .stTextInput label, .stDateInput label {
         font-size: 20px !important;
         font-weight: bold !important;
     }
-    /* 放大輸入框內的文字 */
     .stTextInput input, .stDateInput input {
         font-size: 20px !important;
         font-weight: bold !important;
     }
-    /* 放大主標題與文字 */
     h1 {
-        font-size: 32px !important;
+        font-size: 30px !important;
     }
     </style>
 """,
@@ -191,7 +188,9 @@ if check_password():
       fig.add_trace(
           io_plotly.Scatter(
               x=plot_df.index,
-              y=plot_df["Retail_Flow"],
+              y=plot_df["Retail_Ratio"]
+              if "Retail_Ratio" in plot_df.columns
+              else plot_df["Retail_Flow"],
               name="散戶持倉動向(張)",
               mode="lines+markers",
               line=dict(color="#FF4D4D", width=2.5),
@@ -204,51 +203,54 @@ if check_password():
           secondary_y=True,
       )
 
-    # 圖表佈局與大字體設定
+    # 圖表佈局修正：加大頂部間距與獨立圖例位置，防止 iPad 文字重疊
     fig.update_layout(
         title={
             "text": f"<b>股票代號：{stock_id} 每日股價 vs 散戶持倉動向</b>",
-            "x": 0.4,
-            "font": {"size": 26},  # 大標題字體
+            "x": 0.5,
+            "xanchor": "center",
+            "y": 0.98,
+            "yanchor": "top",
+            "font": {"size": 22},
         },
         hovermode="x unified",
         autosize=True,
-        margin=dict(l=20, r=20, t=60, b=20),
+        margin=dict(l=20, r=20, t=100, b=20),  # 上邊距由 60 加大至 100
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(size=18),  # 圖例字體
+            y=1.02,  # 將圖例往上移，開闢獨立區域
+            xanchor="center",
+            x=0.5,
+            font=dict(size=16),
         ),
-        hoverlabel=dict(font_size=18),  # 懸停提示框字體
+        hoverlabel=dict(font_size=16),
     )
 
-    # 左 Y 軸：淺藍色 {股票價格} 大字體
+    # 左 Y 軸：淺藍色 {股票價格}
     fig.update_yaxes(
         title_text="<b style='color:#3399FF;'>股票價格 (元)</b>",
-        title_font=dict(size=22),
-        tickfont=dict(size=16),
+        title_font=dict(size=20),
+        tickfont=dict(size=15),
         secondary_y=False,
         showgrid=True,
         gridcolor="#E2E2E2",
     )
 
-    # 右 Y 軸：橘紅色 {散戶持倉動向} 大字體
+    # 右 Y 軸：橘紅色 {散戶持倉動向}
     fig.update_yaxes(
         title_text="<b style='color:#FF4D4D;'>散戶持倉動向 (張)</b>",
-        title_font=dict(size=22),
-        tickfont=dict(size=16),
+        title_font=dict(size=20),
+        tickfont=dict(size=15),
         secondary_y=True,
         showgrid=False,
     )
 
-    # 下方 X 軸：日期大字體
+    # 下方 X 軸
     fig.update_xaxes(
         title_text=f"<b>日期期間：{start_date} ～ {end_date}</b>",
-        title_font=dict(size=20),
-        tickfont=dict(size=16),
+        title_font=dict(size=18),
+        tickfont=dict(size=15),
         showgrid=True,
         gridcolor="#E2E2E2",
     )
