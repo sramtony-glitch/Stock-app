@@ -5,6 +5,7 @@ import plotly.graph_objects as io_plotly
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 
 # 設定網頁標題與響應式滿版版面
@@ -12,7 +13,7 @@ st.set_page_config(
     page_title="台股籌碼與股價對照系統", page_icon="📈", layout="wide"
 )
 
-# 注入 CSS 調整欄位樣式
+# 注入 CSS 調整介面字體大小
 st.markdown(
     """
     <style>
@@ -25,7 +26,7 @@ st.markdown(
 )
 
 # ----------------------------------------------------
-# 🔐 1. 欄位一：每月密碼驗證
+# 🔐 1. 欄位一：每月密碼驗證 (持久化記憶：30天免重複輸入)
 # ----------------------------------------------------
 current_time = datetime.now()
 year_month_key = current_time.strftime("%Y_%m")
@@ -43,28 +44,73 @@ YEARLY_PASSWORDS = {
 
 CORRECT_PASSWORD = YEARLY_PASSWORDS.get(year_month_key, "stock2026")
 
+# 初始化 session state
+if "authenticated" not in st.session_state:
+  st.session_state["authenticated"] = False
+
+# 檢查 URL query parameter 是否包含瀏覽器認證憑證
+query_params = st.query_params
+if (
+    not st.session_state["authenticated"]
+    and query_params.get("auth_token") == CORRECT_PASSWORD
+):
+  st.session_state["authenticated"] = True
+
 
 def check_password():
-  if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
+  if st.session_state["authenticated"]:
+    return True
 
-  if not st.session_state["authenticated"]:
-    st.title("🔒 系統授權鎖定")
-    st.caption("請輸入每月授權密碼以存取圖表分析。")
+  st.title("🔒 系統授權鎖定")
+  st.caption("請輸入每月授權密碼以存取圖表分析（輸入一次可維持 30 天登入狀態）。")
 
-    user_pwd = st.text_input("【欄位一】請輸入授權密碼：", type="password")
+  user_pwd = st.text_input("【欄位一】請輸入授權密碼：", type="password")
 
-    if st.button("解鎖並進入系統", type="primary"):
-      if user_pwd == CORRECT_PASSWORD:
-        st.session_state["authenticated"] = True
-        st.success("驗證成功！")
-        st.rerun()
-      else:
-        st.error("❌ 密碼錯誤，請向管理者索取當月密碼！")
+  if st.button("解鎖並進入系統", type="primary"):
+    if user_pwd == CORRECT_PASSWORD:
+      st.session_state["authenticated"] = True
+      # 將認證資訊寫入 URL 參數與 LocalStorage，讓瀏覽器記住 30 天
+      st.query_params["auth_token"] = CORRECT_PASSWORD
+      st.success("驗證成功！已自動記住認證狀態。")
+      st.rerun()
+    else:
+      st.error("❌ 密碼錯誤，請向管理者索取當月密碼！")
 
-    return False
-  return True
+  # 嵌入 JS 自動檢查本地 localStorage 快取憑證
+  components.html(
+      f"""
+        <script>
+            const savedToken = localStorage.getItem('stock_app_auth_token');
+            const tokenTime = localStorage.getItem('stock_app_auth_time');
+            const now = new Date().getTime();
+            
+            // 檢查是否在大於 30 天內 (30 * 24 * 60 * 60 * 1000 ms)
+            if (savedToken === '{CORRECT_PASSWORD}' && tokenTime && (now - parseInt(tokenTime) < 2592000000)) {{
+                const url = new URL(window.location.href);
+                if (!url.searchParams.has('auth_token')) {{
+                    url.searchParams.set('auth_token', '{CORRECT_PASSWORD}');
+                    window.location.href = url.href;
+                }}
+            }}
+        </script>
+    """,
+      height=0,
+  )
 
+  return False
+
+
+# 如果認證成功，自動記錄到 LocalStorage 保持 30 天免輸入
+if st.session_state["authenticated"]:
+  components.html(
+      f"""
+        <script>
+            localStorage.setItem('stock_app_auth_token', '{CORRECT_PASSWORD}');
+            localStorage.setItem('stock_app_auth_time', new Date().getTime().toString());
+        </script>
+    """,
+      height=0,
+  )
 
 # ----------------------------------------------------
 # 🚀 2. 主程式
@@ -116,7 +162,6 @@ if check_password():
         summary["Date"] = pd.to_datetime(summary["Date"])
         summary = summary.sort_values("Date")
 
-        # 關鍵精髓：進行「累積加總」，產生平滑不鋸齒的真實趨勢折線！
         summary["Retail_Cumsum"] = summary["Retail_Flow"].cumsum()
         return summary
     except Exception:
@@ -174,7 +219,7 @@ if check_password():
         secondary_y=False,
     )
 
-    # 折線二：橘紅色 散戶累積持倉動向 (右 Y 軸) - 平滑流暢不劇烈跳動！
+    # 折線二：橘紅色 散戶累積持倉動向 (右 Y 軸)
     if "Retail_Cumsum" in plot_df.columns and not plot_df[
         "Retail_Cumsum"
     ].isna().all():
