@@ -169,7 +169,7 @@ if check_password():
         "【欄位二】股票代號（範例: 2618）", value="2618"
     ).strip()
 
-  default_start = datetime.now().date() - timedelta(days=120)  # 擴大天數計算20日成本
+  default_start = datetime.now().date() - timedelta(days=120)
   default_end = datetime.now().date()
 
   with col2:
@@ -179,7 +179,7 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 外資與散戶籌碼及金額估算器
+  # 📊 外資與散戶籌碼數據
   # ----------------------------------------------------
   @st.cache_data(ttl=1800)
   def fetch_institutional_data(stock_code, s_date, e_date):
@@ -195,9 +195,8 @@ if check_password():
       data = resp.json()
       if data.get("msg") == "success" and data.get("data"):
         df = pd.DataFrame(data["data"])
-        df["buy"] = pd.to_numeric(df["buy"], errors="coerce") / 1000.0  # 張數
+        df["buy"] = pd.to_numeric(df["buy"], errors="coerce") / 1000.0
 
-        # 區分 外資(Foreign) 與 三大法人合計
         foreign_df = df[df["name"].str.contains("Foreign|外資", na=False)]
         foreign_buy = (
             foreign_df.groupby("date")["buy"].sum().reset_index()
@@ -237,7 +236,7 @@ if check_password():
     st.stop()
 
   # ----------------------------------------------------
-  # 📈 繪製圖表：日 K 線 + 外資20日成本線 + 散戶20日成本線
+  # 📈 繪製圖表 (關閉底部 rangeslider)
   # ----------------------------------------------------
   if price_df.empty:
     st.warning(f"❌ 查無股票代號【{stock_id}】的股價資料！")
@@ -247,7 +246,7 @@ if check_password():
       high_s = price_df["High"][ticker]
       low_s = price_df["Low"][ticker]
       close_s = price_df["Close"][ticker]
-      vol_s = price_df["Volume"][ticker] / 1000.0  # 張數
+      vol_s = price_df["Volume"][ticker] / 1000.0
     else:
       open_s = price_df["Open"]
       high_s = price_df["High"]
@@ -271,16 +270,13 @@ if check_password():
     plot_df["Foreign_Buy_Qty"] = plot_df["Foreign_Buy_Qty"].fillna(0)
     plot_df["Inst_Buy_Qty"] = plot_df["Inst_Buy_Qty"].fillna(0)
 
-    # 散戶買進張數 = 每日總交易量 - 三大法人買進張數
     plot_df["Retail_Volume"] = (
         plot_df["Total_Volume"] - plot_df["Inst_Buy_Qty"]
     ).apply(lambda x: max(x, 0))
 
-    # 計算估算金額 (張數 * 收盤價)
     plot_df["Foreign_Amt"] = plot_df["Foreign_Buy_Qty"] * plot_df["Close"]
     plot_df["Retail_Amt"] = plot_df["Retail_Volume"] * plot_df["Close"]
 
-    # 🧮 關鍵演算法：20日滾動加權平均成本 (成交總金額 / 成交總張數)
     plot_df["Foreign_20D_Cost"] = (
         plot_df["Foreign_Amt"].rolling(window=20).sum()
         / plot_df["Foreign_Buy_Qty"].rolling(window=20).sum()
@@ -290,7 +286,6 @@ if check_password():
         / plot_df["Retail_Volume"].rolling(window=20).sum()
     )
 
-    # 若買量為零以 20日均價 (MA20) 補充
     plot_df["MA20"] = plot_df["Close"].rolling(window=20).mean()
     plot_df["Foreign_20D_Cost"] = plot_df["Foreign_20D_Cost"].fillna(
         plot_df["MA20"]
@@ -301,7 +296,7 @@ if check_password():
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # 🟢🔴 1. 繪製台股標準日 K 線圖 (左 Y 軸)
+    # 1. 繪製台股標準日 K 線圖
     fig.add_trace(
         io_plotly.Candlestick(
             x=plot_df.index,
@@ -318,7 +313,7 @@ if check_password():
         secondary_y=False,
     )
 
-    # 🔵 2. 繪製 20日外資成本線 (左 Y 軸 - 價格軸)
+    # 2. 外資20日成本線
     fig.add_trace(
         io_plotly.Scatter(
             x=plot_df.index,
@@ -331,7 +326,7 @@ if check_password():
         secondary_y=False,
     )
 
-    # 🟠 3. 繪製 20日散戶成本線 (左 Y 軸 - 價格軸)
+    # 3. 散戶20日成本線
     fig.add_trace(
         io_plotly.Scatter(
             x=plot_df.index,
@@ -371,10 +366,12 @@ if check_password():
             font=dict(size=15),
         ),
         hoverlabel=dict(font_size=15),
+        # 關鍵精髓：徹底隱藏底部的 rangeslider
         xaxis=dict(
             fixedrange=True,
             type="date",
             rangebreaks=[dict(bounds=["sat", "mon"])],
+            rangeslider=dict(visible=False),
         ),
         yaxis=dict(fixedrange=True),
     )
