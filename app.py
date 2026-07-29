@@ -13,16 +13,19 @@ st.set_page_config(
     page_title="台股籌碼與股價對照系統", page_icon="📈", layout="wide"
 )
 
-# 注入 CSS 調整欄位樣式與觸控手勢體驗
+# 注入 Viewport 網頁頭部設定，允許手機/iPad 兩手指開合放大整個網頁
 st.markdown(
     """
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    </head>
     <style>
     .stTextInput label, .stDateInput label { font-size: 18px !important; font-weight: bold !important; }
     .stTextInput input, .stDateInput input { font-size: 18px !important; font-weight: bold !important; }
     h1 { font-size: 28px !important; }
-    /* 允許繪圖區支援雙指觸控手勢 */
+    /* 解除圖表對觸控手勢的獨佔，讓雙指放大作用在整個頁面上 */
     .js-plotly-plot .plotly .main-svg {
-        touch-action: manipulation;
+        touch-action: auto !important;
     }
     </style>
 """,
@@ -236,7 +239,7 @@ if check_password():
           secondary_y=True,
       )
 
-    # 圖表佈局
+    # 圖表佈局：固定 X/Y 軸不讓圖表單獨被拉走，維持整體安定性
     fig.update_layout(
         title={
             "text": f"<b>股票代號：{stock_id} 每日股價 vs 散戶持倉趨勢</b>",
@@ -258,6 +261,9 @@ if check_password():
             font=dict(size=15),
         ),
         hoverlabel=dict(font_size=15),
+        xaxis=dict(fixedrange=True),  # 鎖定 X 軸單獨位移
+        yaxis=dict(fixedrange=True),  # 鎖定左 Y 軸單獨位移
+        yaxis2=dict(fixedrange=True),  # 鎖定右 Y 軸單獨位移
     )
 
     fig.update_yaxes(
@@ -285,9 +291,9 @@ if check_password():
         gridcolor="#E2E2E2",
     )
 
-    # 開啟雙指縮放 (scrollZoom=True)，關閉阻礙視覺的工具列
+    # 禁用 Plotly 內部的獨立縮放，讓全網頁跟著雙指手勢一起放大縮小
     st.plotly_chart(
         fig,
         use_container_width=True,
-        config={"scrollZoom": True, "displayModeBar": False},
+        config={"scrollZoom": False, "displayModeBar": False},
     )
