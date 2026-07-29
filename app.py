@@ -1,6 +1,9 @@
+import ssl
 import pandas as pd
 import streamlit as st
 
+# 解決 SSL 安全憑證驗證失敗問題 (關鍵修正)
+ssl._create_default_https_context = ssl._create_unverified_context
 
 # 設定網頁標題與圖示
 st.set_page_config(page_title="台股籌碼大戶散戶查詢", page_icon="📈")
