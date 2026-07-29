@@ -112,11 +112,10 @@ if st.session_state["authenticated"]:
 
 
 # ----------------------------------------------------
-# 🏷️ 台股繁體中文名稱查詢器 (TWSE 官方 API + 備用字典)
+# 🏷️ 台股繁體中文名稱查詢器
 # ----------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_tw_stock_name(stock_code):
-  # A. 優先聯網查詢證交所 OpenAPI 官方中文清單
   try:
     url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
     resp = requests.get(url, timeout=5)
@@ -128,7 +127,6 @@ def get_tw_stock_name(stock_code):
   except Exception:
     pass
 
-  # B. 若 OpenAPI 逾時，使用內建萬用繁體中文字典
   fallback_names = {
       "2330": "台積電",
       "2317": "鴻海",
@@ -143,15 +141,10 @@ def get_tw_stock_name(stock_code):
       "2382": "廣達",
       "3231": "緯創",
       "2356": "英業達",
-      "2412": "中華電",
-      "2881": "富邦金",
-      "2882": "國泰金",
-      "2891": "中信金",
   }
   if stock_code in fallback_names:
     return fallback_names[stock_code]
 
-  # C. 最後嘗試請求 FinMind 取得中文名稱
   try:
     fm_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo&data_id={stock_code}"
     res = requests.get(fm_url, timeout=5).json()
@@ -167,7 +160,7 @@ def get_tw_stock_name(stock_code):
 # 🚀 2. 主程式
 # ----------------------------------------------------
 if check_password():
-  st.title("📈 台股每日股價 vs 散戶持倉趨勢對照圖")
+  st.title("📈 台股每日 K 線圖 vs 散戶持倉趨勢對照圖")
 
   col1, col2, col3 = st.columns([2, 1.5, 1.5])
 
@@ -220,11 +213,11 @@ if check_password():
     return pd.DataFrame()
 
   try:
-    with st.spinner("正在讀取每日股價、公司中文名稱與散戶籌碼動向..."):
+    with st.spinner("正在讀取日 K 線與散戶籌碼動向..."):
       # 1. 獲取股票繁體中文名稱
       stock_name = get_tw_stock_name(stock_id)
 
-      # 2. 下載股價
+      # 2. 下載完整的 OHLC (開高低收) 股價資料
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -243,17 +236,29 @@ if check_password():
     st.stop()
 
   # ----------------------------------------------------
-  # 📈 繪製雙 Y 軸 疊加折線圖
+  # 📈 繪製雙 Y 軸 疊加圖表 (日 K 線 + 散戶籌碼折線)
   # ----------------------------------------------------
   if price_df.empty:
     st.warning(f"❌ 查無股票代號【{stock_id}】的股價資料！")
   else:
+    # 處理 yfinance 可能返回 MultiIndex 的欄位結構
     if isinstance(price_df.columns, pd.MultiIndex):
-      price_series = price_df["Close"][ticker]
+      open_s = price_df["Open"][ticker]
+      high_s = price_df["High"][ticker]
+      low_s = price_df["Low"][ticker]
+      close_s = price_df["Close"][ticker]
     else:
-      price_series = price_df["Close"]
+      open_s = price_df["Open"]
+      high_s = price_df["High"]
+      low_s = price_df["Low"]
+      close_s = price_df["Close"]
 
-    plot_df = pd.DataFrame({"Price": price_series})
+    plot_df = pd.DataFrame({
+        "Open": open_s,
+        "High": high_s,
+        "Low": low_s,
+        "Close": close_s,
+    })
     plot_df.index = pd.to_datetime(plot_df.index)
 
     if not retail_df.empty:
@@ -262,20 +267,25 @@ if check_password():
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # 折線一：淺藍色 股票價格 (左 Y 軸)
+    # 🟢🔴 1. 繪製台股標準日 K 線圖 (左 Y 軸)
+    # 台灣標準：上漲 (increasing) = 紅色 #FF3333，下跌 (decreasing) = 綠色 #00B359
     fig.add_trace(
-        io_plotly.Scatter(
+        io_plotly.Candlestick(
             x=plot_df.index,
-            y=plot_df["Price"],
-            name="股票價格",
-            mode="lines",
-            line=dict(color="#3399FF", width=3),
-            hovertemplate="%{x|%Y-%m-%d}<br>股價: $%{y:.2f}",
+            open=plot_df["Open"],
+            high=plot_df["High"],
+            low=plot_df["Low"],
+            close=plot_df["Close"],
+            name="日 K 線",
+            increasing_line_color="#FF3333",
+            increasing_fillcolor="#FF3333",  # 上漲紅 K 實體
+            decreasing_line_color="#00B359",
+            decreasing_fillcolor="#00B359",  # 下跌綠 K 實體
         ),
         secondary_y=False,
     )
 
-    # 折線二：橘紅色 散戶累積持倉動向 (右 Y 軸)
+    # 🟠 2. 繪製橘紅色 散戶累積持倉動向 (右 Y 軸)
     if "Retail_Cumsum" in plot_df.columns and not plot_df[
         "Retail_Cumsum"
     ].isna().all():
@@ -285,7 +295,7 @@ if check_password():
               y=plot_df["Retail_Cumsum"],
               name="散戶持倉趨勢(張)",
               mode="lines",
-              line=dict(color="#FF4D4D", width=2.5),
+              line=dict(color="#FF8C00", width=2.5),  # 調整為亮眼橘色
               connectgaps=True,
               hovertemplate=(
                   "%{x|%Y-%m-%d}<br>散戶累積加碼: %{y:,.0f} 張"
@@ -294,7 +304,7 @@ if check_password():
           secondary_y=True,
       )
 
-    # 組合顯示股票繁體中文名稱標題 (例如: 長榮航 (2618))
+    # 組合顯示股票繁體中文名稱標題
     display_title = (
         f"{stock_name} ({stock_id})" if stock_name != stock_id else stock_id
     )
@@ -302,7 +312,7 @@ if check_password():
     fig.update_layout(
         title={
             "text": (
-                f"<b>【{display_title}】 每日股價 vs 散戶持倉趨勢</b>"
+                f"<b>【{display_title}】 每日 K 線 vs 散戶持倉趨勢</b>"
             ),
             "x": 0.5,
             "xanchor": "center",
@@ -322,13 +332,19 @@ if check_password():
             font=dict(size=15),
         ),
         hoverlabel=dict(font_size=15),
-        xaxis=dict(fixedrange=True),
+        # 預設過濾週末無交易日，讓 K 棒連接更流暢
+        xaxis=dict(
+            fixedrange=True,
+            type="date",
+            rangebreaks=[dict(bounds=["sat", "mon"])],
+        ),
         yaxis=dict(fixedrange=True),
         yaxis2=dict(fixedrange=True),
     )
 
+    # 左 Y 軸：日 K 線價格
     fig.update_yaxes(
-        title_text="<b style='color:#3399FF;'>股票價格 (元)</b>",
+        title_text="<b>股票價格 (元)</b>",
         title_font=dict(size=18),
         tickfont=dict(size=14),
         secondary_y=False,
@@ -336,14 +352,16 @@ if check_password():
         gridcolor="#E2E2E2",
     )
 
+    # 右 Y 軸：橘色 {散戶持倉趨勢}
     fig.update_yaxes(
-        title_text="<b style='color:#FF4D4D;'>散戶持倉累積趨勢 (張)</b>",
+        title_text="<b style='color:#FF8C00;'>散戶持倉累積趨勢 (張)</b>",
         title_font=dict(size=18),
         tickfont=dict(size=14),
         secondary_y=True,
         showgrid=False,
     )
 
+    # 下方 X 軸
     fig.update_xaxes(
         title_text=f"<b>日期期間：{start_date} ～ {end_date}</b>",
         title_font=dict(size=16),
