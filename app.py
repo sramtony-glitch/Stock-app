@@ -12,7 +12,7 @@ st.title("📈 台股大戶 vs 散戶持股查詢")
 st.caption("資料來源：臺灣集中保管結算所 (TDCC) 每週每人股權分散表")
 
 # 1. 載入資料（使用快取機制）
-@st.cache_data(ttl=3600)
+# @st.cache_data(ttl=3600)
 def load_data():
     url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
     df = pd.read_csv(url, dtype=str)
