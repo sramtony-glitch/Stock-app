@@ -1,86 +1,102 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 import pandas as pd
+import plotly.graph_objects as io_plotly
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
+import yfinance as yf
 
-# 設定網頁標題與圖示
-st.set_page_config(page_title="台股籌碼大戶散戶查詢", page_icon="📈")
+# 設定網頁標題、圖示與響應式版面 (自動滿版)
+st.set_page_config(
+    page_title="台股籌碼與股價對照系統", page_icon="📈", layout="wide"
+)
 
 # ----------------------------------------------------
-# 🔐 自動讀取「當月預設密碼」
+# 🔐 1. 欄位一：每月密碼驗證 (自動對照一整年)
 # ----------------------------------------------------
 current_time = datetime.now()
-year_month_key = current_time.strftime("%Y_%m")  # 格式例如: 2026_07
+year_month_key = current_time.strftime("%Y_%m")
 
-# 預先排定一整年的密碼清單（若當月未設定則使用 DEFAULT）
 YEARLY_PASSWORDS = {
-    "2026_07": "stock777",  # 2026年7月密碼
-    "2026_08": "august888",  # 2026年8月密碼
-    "2026_09": "september999",  # 2026年9月密碼
-    "2026_10": "october168",  # 2026年10月密碼
-    "2026_11": "november520",  # 2026年11月密碼
-    "2026_12": "december999",  # 2026年12月密碼
-    "2027_01": "happy2027",  # 2027年1月密碼
-    "2027_02": "cny2027",  # 2027年2月密碼
-    "2027_03": "spring333",  # 2027年3月密碼
-    "2027_04": "april444",  # 2027年4月密碼
-    "2027_05": "may555",  # 2027年5月密碼
-    "2027_06": "june666",  # 2027年6月密碼
+    "2026_07": "stock777",
+    "2026_08": "august888",
+    "2026_09": "september999",
+    "2026_10": "october168",
+    "2026_11": "november520",
+    "2026_12": "december999",
+    "2027_01": "happy2027",
+    "2027_02": "cny2027",
 }
 
-# 取得這個月應該使用的密碼
-CORRECT_PASSWORD = YEARLY_PASSWORDS.get(
-    year_month_key, "stock2026"
-)  # 後方為預備備用密碼
+CORRECT_PASSWORD = YEARLY_PASSWORDS.get(year_month_key, "stock2026")
 
 
-# 檢查密碼的函式
 def check_password():
   if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
   if not st.session_state["authenticated"]:
-    st.title("🔒 系統已鎖定")
-    st.caption("本工具需輸入授權密碼才可使用，密碼每月更新。")
+    st.title("🔒 系統授權鎖定")
+    st.caption("請輸入每月授權密碼以存取圖表分析。")
 
-    user_pwd = st.text_input("請輸入當月授權密碼：", type="password")
+    user_pwd = st.text_input(
+        "【欄位一】請輸入授權密碼：", type="password"
+    )
 
-    if st.button("解鎖使用", type="primary"):
+    if st.button("解鎖並進入系統", type="primary"):
       if user_pwd == CORRECT_PASSWORD:
         st.session_state["authenticated"] = True
-        st.success("密碼正確！解鎖成功！")
+        st.success("驗證成功！")
         st.rerun()
       else:
-        st.error("❌ 密碼錯誤，請向管理者索取當月最新密碼！")
+        st.error("❌ 密碼錯誤，請向管理者索取當月密碼！")
 
     return False
-
   return True
 
 
 # ----------------------------------------------------
-# 🚀 主程式 (密碼驗證通過後才執行)
+# 🚀 2. 主程式 (密碼通過後顯示)
 # ----------------------------------------------------
 if check_password():
-  st.title("📈 台股大戶 vs 散戶持股查詢")
-  st.caption("資料來源：臺灣集中保管結算所 (TDCC) 每週每人股權分散表")
+  st.title("📈 台股股價 vs 散戶持股比例對照圖")
 
-  # 1. 載入資料
-  def load_data():
+  # ----------------------------------------------------
+  # 📥 介面輸入欄位 (欄位二、三、四)
+  # ----------------------------------------------------
+  col1, col2, col3 = st.columns([2, 1.5, 1.5])
+
+  with col1:
+    stock_id = st.text_input(
+        "【欄位二】股票代號（範例: 2330）", value="2330"
+    ).strip()
+
+  # 預設時間範圍為過去兩個月
+  default_start = datetime.now().date() - timedelta(days=60)
+  default_end = datetime.now().date()
+
+  with col2:
+    start_date = st.date_input("【欄位三】起始日期", value=default_start)
+
+  with col3:
+    end_date = st.date_input("【欄位四】結束日期", value=default_end)
+
+  # ----------------------------------------------------
+  # 📊 資料抓取與處理解析
+  # ----------------------------------------------------
+  # A. 下載集保籌碼資料 (散戶持股)
+  @st.cache_data(ttl=3600)
+  def fetch_tdcc_data():
     url = "https://opendata.tdcc.com.tw/getOD.ashx?id=1-5"
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
     }
-
-    response = requests.get(url, headers=headers, verify=False, timeout=30)
-    response.encoding = "utf-8"
-
-    csv_data = io.StringIO(response.text)
-    df = pd.read_csv(csv_data, dtype=str)
+    res = requests.get(url, headers=headers, verify=False, timeout=30)
+    res.encoding = "utf-8"
+    df = pd.read_csv(io.StringIO(res.text), dtype=str)
 
     date_col, code_col, level_col, shares_col = (
         df.columns[0],
@@ -94,46 +110,141 @@ if check_password():
     return df, date_col, code_col, level_col, shares_col
 
   try:
-    with st.spinner("正在讀取最新集保資料..."):
-      df, date_col, code_col, level_col, shares_col = load_data()
-    st.success("資料載入成功！")
+    with st.spinner("讀取籌碼與股價資料中..."):
+      tdcc_df, date_col, code_col, level_col, shares_col = fetch_tdcc_data()
+
+      # B. 下載 Yahoo Finance 歷史股價資料
+      ticker = (
+          f"{stock_id}.TW"  # 預設上市股票格式，若是上櫃可自動備用修正
+      )
+      price_df = yf.download(
+          ticker, start=start_date, end=end_date + timedelta(days=1)
+      )
+
+      if price_df.empty:  # 嘗試上櫃 .TWO 格式
+        ticker = f"{stock_id}.TWO"
+        price_df = yf.download(
+            ticker, start=start_date, end=end_date + timedelta(days=1)
+        )
+
   except Exception as e:
-    st.error(f"資料讀取失敗，請稍後再試：{e}")
+    st.error(f"資料讀取失敗，請確認網路或股票代號：{e}")
     st.stop()
 
-  # 2. 介面輸入框
-  stock_id = st.text_input(
-      "請輸入股票代號（例如：2330, 2317）", value="2330"
-  ).strip()
+  # ----------------------------------------------------
+  # 📈 運算籌碼比例與繪製雙 Y 軸圖表
+  # ----------------------------------------------------
+  stock_chips = tdcc_df[tdcc_df[code_col] == stock_id]
 
-  # 3. 查詢與顯示結果
-  if st.button("開始查詢", type="primary"):
-    stock_df = df[df[code_col] == stock_id]
+  if stock_chips.empty or price_df.empty:
+    st.warning(f"❌ 查無股票代號【{stock_id}】在此區間的完整資料！")
+  else:
+    # 算散戶持股% (1-9分級為 <=50張散戶)
+    # 集保資料為每週更新，做日期篩選與處理
+    stock_chips["Date_Obj"] = pd.to_datetime(
+        stock_chips[date_col], format="%Y%m%d", errors="coerce"
+    )
+    mask = (stock_chips["Date_Obj"].dt.date >= start_date) & (
+        stock_chips["Date_Obj"].dt.date <= end_date
+    )
+    filtered_chips = stock_chips[mask]
 
-    if not stock_df.empty:
-      date_val = stock_df[date_col].iloc[0]
-      total_row = stock_df[stock_df[level_col] == 17]
-      total_shares = (
+    chip_summary = []
+    for d, group in filtered_chips.groupby("Date_Obj"):
+      total_row = group[group[level_col] == 17]
+      tot_shares = (
           total_row[shares_col].values[0]
           if not total_row.empty
-          else stock_df[shares_col].sum()
+          else group[shares_col].sum()
       )
 
-      valid_df = stock_df[stock_df[level_col].between(1, 15)]
-      big_shares = valid_df[valid_df[level_col] >= 12][shares_col].sum()
-      retail_shares = valid_df[valid_df[level_col] <= 9][shares_col].sum()
+      # 散戶 <= 50張 (級別 1-9)
+      retail_shares = group[group[level_col].between(1, 9)][shares_col].sum()
+      # 大戶 >= 200張 (級別 12-15)
+      big_shares = group[group[level_col] >= 12][shares_col].sum()
 
-      big_ratio = (big_shares / total_shares) * 100
-      retail_ratio = (retail_shares / total_shares) * 100
+      retail_ratio = (
+          (retail_shares / tot_shares) * 100 if tot_shares > 0 else 0
+      )
+      big_ratio = (big_shares / tot_shares) * 100 if tot_shares > 0 else 0
 
-      st.markdown("---")
-      st.subheader(f"股票代號：{stock_id} （資料日期：{date_val}）")
+      chip_summary.append({
+          "Date": d,
+          "Retail_Ratio": round(retail_ratio, 2),
+          "Big_Ratio": round(big_ratio, 2),
+      })
 
-      col1, col2 = st.columns(2)
-      col1.metric(label="🏛️ 大戶持股 (≥200張)", value=f"{big_ratio:.2f}%")
-      col2.metric(label="🧑‍🤝‍🧑 散戶持股 (≤50張)", value=f"{retail_ratio:.2f}%")
+    chip_df = pd.DataFrame(chip_summary)
 
+    # 處理股價 Close 欄位
+    if isinstance(price_df.columns, pd.MultiIndex):
+      price_series = price_df["Close"][ticker]
     else:
-      st.warning(
-          f"❌ 找不到股票代碼【{stock_id}】的資料，請確認後重新輸入！"
+      price_series = price_df["Close"]
+
+    # ----------------------------------------------------
+    # 🎨 建立手繪圖要求的 雙 Y 軸 疊加折線圖
+    # ----------------------------------------------------
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # 折線一：淺藍色 股票價格 (左邊 Y 軸)
+    fig.add_trace(
+        io_plotly.Scatter(
+            x=price_series.index,
+            y=price_series.values,
+            name="股票價格",
+            line=dict(color="#3399FF", width=3),  # 淺藍色
+            hovertemplate="%{x|%Y-%m-%d}<br>股價: $%{y:.2f}",
+        ),
+        secondary_y=False,
+    )
+
+    # 折線二：橘紅色 散戶持倉% (右邊 Y 軸)
+    if not chip_df.empty:
+      fig.add_trace(
+          io_plotly.Scatter(
+              x=chip_df["Date"],
+              y=chip_df["Retail_Ratio"],
+              name="散戶持倉比(%)",
+              line=dict(color="#FF4D4D", width=3),  # 橘紅色
+              hovertemplate="%{x|%Y-%m-%d}<br>散戶持倉: %{y:.2f}%",
+          ),
+          secondary_y=True,
       )
+
+    # 設定 Y 軸標題與色彩風格 (如手繪稿的要求)
+    fig.update_layout(
+        title=f"<b>股票代號：{stock_id} 股價 vs 散戶持倉比</b>",
+        title_x=0.4,
+        hovermode="x unified",
+        autosize=True,  # 跨裝置自動滿版適應
+        margin=dict(l=20, r=20, t=50, b=20),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+        ),
+    )
+
+    # 左側 Y 軸：淺藍色 {股票價格}
+    fig.update_yaxes(
+        title_text="<b style='color:#3399FF;'>股票價格 (元)</b>",
+        secondary_y=False,
+        showgrid=True,
+        gridcolor="#E2E2E2",
+    )
+
+    # 右側 Y 軸：橘紅色 {散戶持倉比}
+    fig.update_yaxes(
+        title_text="<b style='color:#FF4D4D;'>散戶持倉比 (%)</b>",
+        secondary_y=True,
+        showgrid=False,
+    )
+
+    # 下方 X 軸：日期期間
+    fig.update_xaxes(
+        title_text=f"<b>日期期間：{start_date} ～ {end_date}</b>",
+        showgrid=True,
+        gridcolor="#E2E2E2",
+    )
+
+    # 渲染至全螢幕滿版 (Responsive)
+    st.plotly_chart(fig, use_container_width=True)
