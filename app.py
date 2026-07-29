@@ -28,7 +28,7 @@ st.markdown(
 )
 
 # ----------------------------------------------------
-# 🔐 1. 欄位一：每月密碼驗證 (30天記憶)
+# 🔐 1. 密碼驗證
 # ----------------------------------------------------
 current_time = datetime.now()
 year_month_key = current_time.strftime("%Y_%m")
@@ -75,42 +75,11 @@ def check_password():
     else:
       st.error("❌ 密碼錯誤！")
 
-  components.html(
-      f"""
-        <script>
-            const savedToken = localStorage.getItem('stock_app_auth_token');
-            const tokenTime = localStorage.getItem('stock_app_auth_time');
-            const now = new Date().getTime();
-            
-            if (savedToken === '{CORRECT_PASSWORD}' && tokenTime && (now - parseInt(tokenTime) < 2592000000)) {{
-                const url = new URL(window.location.href);
-                if (!url.searchParams.has('auth_token')) {{
-                    url.searchParams.set('auth_token', '{CORRECT_PASSWORD}');
-                    window.location.href = url.href;
-                }}
-            }}
-        </script>
-    """,
-      height=0,
-  )
-
   return False
 
 
-if st.session_state["authenticated"]:
-  components.html(
-      f"""
-        <script>
-            localStorage.setItem('stock_app_auth_token', '{CORRECT_PASSWORD}');
-            localStorage.setItem('stock_app_auth_time', new Date().getTime().toString());
-        </script>
-    """,
-      height=0,
-  )
-
-
 # ----------------------------------------------------
-# 🏷️ 股票中文名稱查詢器
+# 🏷️ 股票名稱查詢
 # ----------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_tw_stock_name(stock_code):
@@ -137,7 +106,7 @@ def get_tw_stock_name(stock_code):
 
 
 # ----------------------------------------------------
-# 🚀 2. 主程式：Eve 價量加權籌碼模型
+# 🚀 2. 主程式
 # ----------------------------------------------------
 if check_password():
   st.title("📈 外資 vs 散戶 價量加權持股成本分析系統")
@@ -159,7 +128,7 @@ if check_password():
     end_date = st.date_input("【結束日期】", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 FinMind 抓取外資買賣超張數
+  # 📊 抓取外資買賣超
   # ----------------------------------------------------
   @st.cache_data(ttl=1800)
   def fetch_foreign_data(stock_code, s_date, e_date):
@@ -175,9 +144,8 @@ if check_password():
       data = resp.json()
       if data.get("msg") == "success" and data.get("data"):
         df = pd.DataFrame(data["data"])
-        df["buy"] = pd.to_numeric(df["buy"], errors="coerce") / 1000.0  # 張數
+        df["buy"] = pd.to_numeric(df["buy"], errors="coerce") / 1000.0
 
-        # 篩選外資
         foreign_df = df[df["name"].str.contains("Foreign|外資", na=False)]
         if not foreign_df.empty:
           f_buy = foreign_df.groupby("date")["buy"].sum().reset_index()
@@ -216,7 +184,7 @@ if check_password():
       high_s = price_df["High"][ticker]
       low_s = price_df["Low"][ticker]
       close_s = price_df["Close"][ticker]
-      vol_s = price_df["Volume"][ticker] / 1000.0  # 張數
+      vol_s = price_df["Volume"][ticker] / 1000.0
     else:
       open_s = price_df["Open"]
       high_s = price_df["High"]
@@ -239,16 +207,15 @@ if check_password():
 
     plot_df["Foreign_Buy"] = plot_df["Foreign_Buy"].fillna(0)
 
-    # ✨ Eve 算式一：散戶張數 = 每日總成交量 - 外資買進張數
+    # 散戶張數 = 總量 - 外資
     plot_df["Retail_Buy"] = (
         plot_df["Total_Vol"] - plot_df["Foreign_Buy"]
     ).apply(lambda x: max(x, 1))
 
-    # 每日成交金額估算 (金額 = 張數 * 當日收盤價)
     plot_df["Foreign_Amt"] = plot_df["Foreign_Buy"] * plot_df["Close"]
     plot_df["Retail_Amt"] = plot_df["Retail_Buy"] * plot_df["Close"]
 
-    # ✨ Eve 算式二：20日滾動價量加權平均成本
+    # 20日滾動價量加權成本
     plot_df["Foreign_20D_Cost"] = (
         plot_df["Foreign_Amt"].rolling(20).sum()
         / plot_df["Foreign_Buy"].rolling(20).sum()
@@ -258,7 +225,6 @@ if check_password():
         / plot_df["Retail_Buy"].rolling(20).sum()
     )
 
-    # 若無外資買盤則用 20日均價補充
     plot_df["MA20"] = plot_df["Close"].rolling(20).mean()
     plot_df["Foreign_20D_Cost"] = plot_df["Foreign_20D_Cost"].fillna(
         plot_df["MA20"]
@@ -267,9 +233,6 @@ if check_password():
         plot_df["MA20"]
     )
 
-    # ----------------------------------------------------
-    # 📈 畫 K 線圖與雙成本線
-    # ----------------------------------------------------
     fig = make_subplots(specs=[[{"secondary_y": False}]])
 
     fig.add_trace(
@@ -287,7 +250,6 @@ if check_password():
         )
     )
 
-    # 🔵 外資價量加權成本線
     fig.add_trace(
         io_plotly.Scatter(
             x=plot_df.index,
@@ -298,7 +260,6 @@ if check_password():
         )
     )
 
-    # 🟠 散戶價量加權成本線
     fig.add_trace(
         io_plotly.Scatter(
             x=plot_df.index,
@@ -332,10 +293,12 @@ if check_password():
             x=0.5,
             font=dict(size=14),
         ),
+        # ✨ 徹底隱藏 Rangeslider (白色小條)
         xaxis=dict(
             fixedrange=True,
             type="date",
             rangebreaks=[dict(bounds=["sat", "mon"])],
+            rangeslider=dict(visible=False),
         ),
         yaxis=dict(fixedrange=True, side="right"),
     )
@@ -346,9 +309,7 @@ if check_password():
         config={"scrollZoom": False, "displayModeBar": False},
     )
 
-    # ----------------------------------------------------
-    # 📋 Eve 專屬：全區間價量數據 summary（方便直接複製丟 AI）
-    # ----------------------------------------------------
+    # Eve 整理文字
     total_foreign_amt = plot_df["Foreign_Amt"].sum()
     total_foreign_qty = plot_df["Foreign_Buy"].sum()
     overall_foreign_cost = (
