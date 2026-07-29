@@ -58,7 +58,7 @@ def check_password():
 # 🚀 2. 主程式
 # ----------------------------------------------------
 if check_password():
-  st.title("📈 台股每日股價 vs 三大法人買賣超對照圖")
+  st.title("📈 台股每日股價 vs 散戶持倉籌碼對照圖")
 
   # 📥 介面輸入欄位
   col1, col2, col3 = st.columns([2, 1.5, 1.5])
@@ -78,10 +78,10 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 每日三大法人買賣超 API 擷取器 (每日 15:30 更新)
+  # 📊 每日散戶持倉籌碼轉換引擎 (以三大法人反向對作精算)
   # ----------------------------------------------------
   @st.cache_data(ttl=1800)
-  def fetch_daily_institutional_investors(stock_code, s_date, e_date):
+  def fetch_daily_retail_flow(stock_code, s_date, e_date):
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
@@ -94,21 +94,27 @@ if check_password():
       data = resp.json()
       if data.get("msg") == "success" and data.get("data"):
         df = pd.DataFrame(data["data"])
-        # 計算每日三大法人合計買賣超 (買進 - 賣出，單位：張)
         df["buy"] = pd.to_numeric(df["buy"], errors="coerce")
         df["sell"] = pd.to_numeric(df["sell"], errors="coerce")
-        df["net"] = (df["buy"] - df["sell"]) / 1000.0  # 轉為張數
 
-        summary = df.groupby("date")["net"].sum().reset_index()
-        summary.columns = ["Date", "Institutional_Net"]
+        # 法人賣超 = 散戶接盤買超，取反向代表散戶每日進出張數
+        df["inst_net"] = (df["buy"] - df["sell"]) / 1000.0  # 張數
+        df["retail_net"] = -df["inst_net"]  # 轉為散戶每日動向
+
+        summary = df.groupby("date")["retail_net"].sum().reset_index()
+        summary.columns = ["Date", "Retail_Flow"]
         summary["Date"] = pd.to_datetime(summary["Date"])
-        return summary.sort_values("Date")
+
+        # 計算散戶累積持倉變化流向 (張)
+        summary = summary.sort_values("Date")
+        summary["Retail_Cumsum"] = summary["Retail_Flow"].cumsum()
+        return summary
     except Exception:
       pass
     return pd.DataFrame()
 
   try:
-    with st.spinner("正在讀取每日股價與三大法人籌碼資料..."):
+    with st.spinner("正在讀取每日股價與散戶籌碼動向..."):
       # 1. 股價資料 (Yahoo Finance)
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
@@ -120,10 +126,8 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
-      # 2. 三大法人每日買賣超
-      inst_df = fetch_daily_institutional_investors(
-          stock_id, start_date, end_date
-      )
+      # 2. 每日散戶持倉籌碼流向
+      retail_df = fetch_daily_retail_flow(stock_id, start_date, end_date)
 
   except Exception as e:
     st.error(f"資料讀取失敗：{e}")
@@ -144,13 +148,13 @@ if check_password():
     plot_df = pd.DataFrame({"Price": price_series})
     plot_df.index = pd.to_datetime(plot_df.index)
 
-    if not inst_df.empty:
-      inst_df = inst_df.set_index("Date")
-      plot_df = plot_df.join(inst_df, how="left")
+    if not retail_df.empty:
+      retail_df = retail_df.set_index("Date")
+      plot_df = plot_df.join(retail_df, how="left")
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # 折線一：淺藍色 股票價格 (左 Y 軸) - 每日數據
+    # 折線一：淺藍色 股票價格 (左 Y 軸)
     fig.add_trace(
         io_plotly.Scatter(
             x=plot_df.index,
@@ -163,27 +167,29 @@ if check_password():
         secondary_y=False,
     )
 
-    # 折線二：橘紅色 三大法人每日買賣超 (右 Y 軸) - 每日數據
-    if "Institutional_Net" in plot_df.columns and not plot_df[
-        "Institutional_Net"
+    # 折線二：橘紅色 散戶持倉籌碼動向 (右 Y 軸) - 每日數據起伏！
+    if "Retail_Flow" in plot_df.columns and not plot_df[
+        "Retail_Flow"
     ].isna().all():
       fig.add_trace(
           io_plotly.Scatter(
               x=plot_df.index,
-              y=plot_df["Institutional_Net"],
-              name="法人買賣超(張)",
+              y=plot_df["Retail_Flow"],
+              name="散戶持倉動向(張)",
               mode="lines+markers",
               line=dict(color="#FF4D4D", width=2),
               marker=dict(size=5, color="#FF4D4D"),
               connectgaps=True,
-              hovertemplate="%{x|%Y-%m-%d}<br>法人買賣超: %{y:,.0f} 張",
+              hovertemplate=(
+                  "%{x|%Y-%m-%d}<br>散戶買超/接盤: %{y:,.0f} 張"
+              ),
           ),
           secondary_y=True,
       )
 
     # 圖表佈局設定
     fig.update_layout(
-        title=f"<b>股票代號：{stock_id} 每日股價 vs 三大法人買賣超</b>",
+        title=f"<b>股票代號：{stock_id} 每日股價 vs 散戶持倉動向</b>",
         title_x=0.4,
         hovermode="x unified",
         autosize=True,
@@ -201,9 +207,9 @@ if check_password():
         gridcolor="#E2E2E2",
     )
 
-    # 右 Y 軸：橘紅色 {法人買賣超}
+    # 右 Y 軸：橘紅色 {散戶持倉動向}
     fig.update_yaxes(
-        title_text="<b style='color:#FF4D4D;'>三大法人買賣超 (張)</b>",
+        title_text="<b style='color:#FF4D4D;'>散戶持倉動向 (張)</b>",
         secondary_y=True,
         showgrid=False,
     )
