@@ -160,7 +160,7 @@ def get_tw_stock_name(stock_code):
 # 🚀 2. 主程式
 # ----------------------------------------------------
 if check_password():
-  st.title("📈 台股每日 K 線圖 vs 散戶交易量與成本對照圖")
+  st.title("📈 台股每日 K 線 vs 20日外資與散戶成本對照圖")
 
   col1, col2, col3 = st.columns([2, 1.5, 1.5])
 
@@ -169,7 +169,7 @@ if check_password():
         "【欄位二】股票代號（範例: 2618）", value="2618"
     ).strip()
 
-  default_start = datetime.now().date() - timedelta(days=90)
+  default_start = datetime.now().date() - timedelta(days=120)  # 擴大天數計算20日成本
   default_end = datetime.now().date()
 
   with col2:
@@ -179,10 +179,10 @@ if check_password():
     end_date = st.date_input("【欄位四】結束日期", value=default_end)
 
   # ----------------------------------------------------
-  # 📊 依公式精算：散戶每日量 (交易總量 - 三大法人買量)
+  # 📊 外資與散戶籌碼及金額估算器
   # ----------------------------------------------------
   @st.cache_data(ttl=1800)
-  def fetch_retail_volume_and_cost(stock_code, s_date, e_date):
+  def fetch_institutional_data(stock_code, s_date, e_date):
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
@@ -197,20 +197,29 @@ if check_password():
         df = pd.DataFrame(data["data"])
         df["buy"] = pd.to_numeric(df["buy"], errors="coerce") / 1000.0  # 張數
 
-        # 加總三大法人當天買進總量 (張)
+        # 區分 外資(Foreign) 與 三大法人合計
+        foreign_df = df[df["name"].str.contains("Foreign|外資", na=False)]
+        foreign_buy = (
+            foreign_df.groupby("date")["buy"].sum().reset_index()
+            if not foreign_df.empty
+            else df.groupby("date")["buy"].sum().reset_index()
+        )
+        foreign_buy.columns = ["Date", "Foreign_Buy_Qty"]
+
         inst_buy = df.groupby("date")["buy"].sum().reset_index()
         inst_buy.columns = ["Date", "Inst_Buy_Qty"]
-        inst_buy["Date"] = pd.to_datetime(inst_buy["Date"])
-        return inst_buy.sort_values("Date")
+
+        res_df = pd.merge(foreign_buy, inst_buy, on="Date", how="outer")
+        res_df["Date"] = pd.to_datetime(res_df["Date"])
+        return res_df.sort_values("Date")
     except Exception:
       pass
     return pd.DataFrame()
 
   try:
-    with st.spinner("正在計算散戶交易量與成本數據..."):
+    with st.spinner("正在計算 20 日外資成本與散戶成本數據..."):
       stock_name = get_tw_stock_name(stock_id)
 
-      # 1. 股價與總交易量 (yfinance)
       ticker = f"{stock_id}.TW"
       price_df = yf.download(
           ticker, start=start_date, end=end_date + timedelta(days=1)
@@ -221,15 +230,14 @@ if check_password():
             ticker, start=start_date, end=end_date + timedelta(days=1)
         )
 
-      # 2. 三大法人買進量
-      inst_df = fetch_retail_volume_and_cost(stock_id, start_date, end_date)
+      inst_df = fetch_institutional_data(stock_id, start_date, end_date)
 
   except Exception as e:
     st.error(f"資料讀取失敗：{e}")
     st.stop()
 
   # ----------------------------------------------------
-  # 📈 繪製雙 Y 軸 疊加圖表 (日 K 線 + 散戶量公式折線)
+  # 📈 繪製圖表：日 K 線 + 外資20日成本線 + 散戶20日成本線
   # ----------------------------------------------------
   if price_df.empty:
     st.warning(f"❌ 查無股票代號【{stock_id}】的股價資料！")
@@ -239,7 +247,7 @@ if check_password():
       high_s = price_df["High"][ticker]
       low_s = price_df["Low"][ticker]
       close_s = price_df["Close"][ticker]
-      vol_s = price_df["Volume"][ticker] / 1000.0  # 轉為張數
+      vol_s = price_df["Volume"][ticker] / 1000.0  # 張數
     else:
       open_s = price_df["Open"]
       high_s = price_df["High"]
@@ -260,11 +268,35 @@ if check_password():
       inst_df = inst_df.set_index("Date")
       plot_df = plot_df.join(inst_df, how="left")
 
-    # 執行新公式算式：散戶量 = 交易總量 - 三大法人買進量
+    plot_df["Foreign_Buy_Qty"] = plot_df["Foreign_Buy_Qty"].fillna(0)
     plot_df["Inst_Buy_Qty"] = plot_df["Inst_Buy_Qty"].fillna(0)
-    plot_df["Retail_Volume"] = plot_df["Total_Volume"] - plot_df["Inst_Buy_Qty"]
-    plot_df["Retail_Volume"] = plot_df["Retail_Volume"].apply(
-        lambda x: max(x, 0)
+
+    # 散戶買進張數 = 每日總交易量 - 三大法人買進張數
+    plot_df["Retail_Volume"] = (
+        plot_df["Total_Volume"] - plot_df["Inst_Buy_Qty"]
+    ).apply(lambda x: max(x, 0))
+
+    # 計算估算金額 (張數 * 收盤價)
+    plot_df["Foreign_Amt"] = plot_df["Foreign_Buy_Qty"] * plot_df["Close"]
+    plot_df["Retail_Amt"] = plot_df["Retail_Volume"] * plot_df["Close"]
+
+    # 🧮 關鍵演算法：20日滾動加權平均成本 (成交總金額 / 成交總張數)
+    plot_df["Foreign_20D_Cost"] = (
+        plot_df["Foreign_Amt"].rolling(window=20).sum()
+        / plot_df["Foreign_Buy_Qty"].rolling(window=20).sum()
+    )
+    plot_df["Retail_20D_Cost"] = (
+        plot_df["Retail_Amt"].rolling(window=20).sum()
+        / plot_df["Retail_Volume"].rolling(window=20).sum()
+    )
+
+    # 若買量為零以 20日均價 (MA20) 補充
+    plot_df["MA20"] = plot_df["Close"].rolling(window=20).mean()
+    plot_df["Foreign_20D_Cost"] = plot_df["Foreign_20D_Cost"].fillna(
+        plot_df["MA20"]
+    )
+    plot_df["Retail_20D_Cost"] = plot_df["Retail_20D_Cost"].fillna(
+        plot_df["MA20"]
     )
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -286,21 +318,30 @@ if check_password():
         secondary_y=False,
     )
 
-    # 🟠 2. 繪製橘紅色【新公式：散戶買進張數】(右 Y 軸)
+    # 🔵 2. 繪製 20日外資成本線 (左 Y 軸 - 價格軸)
     fig.add_trace(
         io_plotly.Scatter(
             x=plot_df.index,
-            y=plot_df["Retail_Volume"],
-            name="散戶買進量(張)",
-            mode="lines+markers",
-            line=dict(color="#FF8C00", width=2.5),
-            marker=dict(size=5, color="#FF8C00"),
-            connectgaps=True,
-            hovertemplate=(
-                "%{x|%Y-%m-%d}<br>散戶估算買張: %{y:,.0f} 張"
-            ),
+            y=plot_df["Foreign_20D_Cost"],
+            name="外資20日成本線",
+            mode="lines",
+            line=dict(color="#0066FF", width=2.5, dash="dot"),
+            hovertemplate="%{x|%Y-%m-%d}<br>外資20日成本: $%{y:.2f}",
         ),
-        secondary_y=True,
+        secondary_y=False,
+    )
+
+    # 🟠 3. 繪製 20日散戶成本線 (左 Y 軸 - 價格軸)
+    fig.add_trace(
+        io_plotly.Scatter(
+            x=plot_df.index,
+            y=plot_df["Retail_20D_Cost"],
+            name="散戶20日成本線",
+            mode="lines",
+            line=dict(color="#FF8C00", width=2.5),
+            hovertemplate="%{x|%Y-%m-%d}<br>散戶20日成本: $%{y:.2f}",
+        ),
+        secondary_y=False,
     )
 
     display_title = (
@@ -310,7 +351,7 @@ if check_password():
     fig.update_layout(
         title={
             "text": (
-                f"<b>【{display_title}】 日 K 線 vs 散戶估算買張(總量-法人買)</b>"
+                f"<b>【{display_title}】 日 K 線 vs 外資成本線 vs 散戶成本線</b>"
             ),
             "x": 0.5,
             "xanchor": "center",
@@ -336,24 +377,15 @@ if check_password():
             rangebreaks=[dict(bounds=["sat", "mon"])],
         ),
         yaxis=dict(fixedrange=True),
-        yaxis2=dict(fixedrange=True),
     )
 
     fig.update_yaxes(
-        title_text="<b>股票價格 (元)</b>",
+        title_text="<b>股票價格 / 成本 (元)</b>",
         title_font=dict(size=18),
         tickfont=dict(size=14),
         secondary_y=False,
         showgrid=True,
         gridcolor="#E2E2E2",
-    )
-
-    fig.update_yaxes(
-        title_text="<b style='color:#FF8C00;'>散戶估算買張 (張)</b>",
-        title_font=dict(size=18),
-        tickfont=dict(size=14),
-        secondary_y=True,
-        showgrid=False,
     )
 
     fig.update_xaxes(
