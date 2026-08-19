@@ -161,6 +161,53 @@ if stock_id:
             plot_df["MA20"]
         )
 
+        # 最新狀態判定 (大戶/散戶 獲利或套牢狀態)
+        latest_close = float(plot_df["Close"].iloc[-1])
+        latest_retail_cost = float(plot_df["Retail_20D_Cost"].iloc[-1])
+        latest_foreign_cost = float(plot_df["Foreign_20D_Cost"].iloc[-1])
+
+        retail_pnl_pct = (
+            (latest_close - latest_retail_cost) / latest_retail_cost
+        ) * 100
+        foreign_pnl_pct = (
+            (latest_close - latest_foreign_cost) / latest_foreign_cost
+        ) * 100
+
+        st.markdown("---")
+        st_col1, st_col2 = st.columns(2)
+        with st_col1:
+            st.markdown("#### 🔵 大戶（外資）狀態")
+            if latest_close >= latest_foreign_cost:
+                st.success(
+                    f"🟢 **大戶獲利中** (現價高於大戶成本 {foreign_pnl_pct:+.2f}%)"
+                )
+            else:
+                st.warning(
+                    f"⚠️ **大戶套牢中** (現價低於大戶成本 {foreign_pnl_pct:+.2f}%)"
+                )
+
+        with st_col2:
+            st.markdown("#### 🟠 散戶狀態")
+            if latest_close >= latest_retail_cost:
+                st.success(
+                    f"🟢 **散戶獲利中** (現價高於散戶成本 {retail_pnl_pct:+.2f}%)"
+                )
+            else:
+                st.warning(
+                    f"⚠️ **散戶套牢中** (現價低於散戶成本 {retail_pnl_pct:+.2f}%)"
+                )
+
+        # ----------------------------------------------------
+        # 💡 指標說明卡片
+        # ----------------------------------------------------
+        st.info(
+            """
+            **📈 均線與成本指標說明：**
+            * 🔵 **藍色線【大戶（外資）成本線 (20D)】**：依外資每日買進金額與張數計算之 20 日價量加權平均成本。當股價維持在大戶成本之上，通常代表主力控盤具支撐力道。
+            * 🟠 **橘色線【散戶成本線 (20D)】**：依市場總成交量扣除外資買盤後之散戶估算成本（20 日價量加權）。若股價低於散戶成本，代表多數散戶處於套牢狀態。
+            """
+        )
+
         # 繪製圖表
         fig = make_subplots(specs=[[{"secondary_y": False}]])
 
@@ -175,31 +222,31 @@ if stock_id:
             )
         )
 
-        # 外資價量加權成本線
+        # 外資/大戶價量加權成本線 (藍色)
         fig.add_trace(
             io_plotly.Scatter(
                 x=plot_df.index,
                 y=plot_df["Foreign_20D_Cost"],
-                name="外資成本 (20D)",
-                line=dict(color="#1f77b4", width=2),
+                name="🔵 大戶(外資)成本 (20D)",
+                line=dict(color="#1f77b4", width=2.5),
             )
         )
 
-        # 散戶價量加權成本線
+        # 散戶價量加權成本線 (橘色)
         fig.add_trace(
             io_plotly.Scatter(
                 x=plot_df.index,
                 y=plot_df["Retail_20D_Cost"],
-                name="散戶成本 (20D)",
-                line=dict(color="#ff7f0e", width=2),
+                name="🟠 散戶成本 (20D)",
+                line=dict(color="#ff7f0e", width=2.5),
             )
         )
 
         fig.update_layout(
             title=dict(
-                text=f"{title_text} 價量加權持股成本走勢",
+                text=f"{title_text} 價量加權持股成本走勢圖",
                 x=0.5,
-                font=dict(size=14),
+                font=dict(size=15),
             ),
             xaxis=dict(
                 fixedrange=True,
@@ -208,6 +255,13 @@ if stock_id:
                 rangeslider=dict(visible=False),
             ),
             yaxis=dict(fixedrange=True, side="right"),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5,
+            ),
         )
 
         st.plotly_chart(
@@ -233,7 +287,7 @@ if stock_id:
 
         st.markdown("### 📋 區間籌碼成本總結")
         m1, m2 = st.columns(2)
-        m1.metric("外資全區間平均成本", f"{overall_foreign_cost:.2f} 元")
-        m2.metric("散戶全區間平均成本", f"{overall_retail_cost:.2f} 元")
+        m1.metric("🔵 大戶(外資)全區間平均成本", f"{overall_foreign_cost:.2f} 元")
+        m2.metric("🟠 散戶全區間平均成本", f"{overall_retail_cost:.2f} 元")
     else:
         st.warning("⚠️ 查無此股票行情資料，請確認股票代號是否正確。")
