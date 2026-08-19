@@ -11,7 +11,7 @@ import yfinance as yf
 # ⚙️ 頁面設定
 # ----------------------------------------------------
 st.set_page_config(
-    page_title="散戶 vs 法人 價量加權持股成本分析系統 (規格書 v1.0)",
+    page_title="散戶 vs 法人 價量加權持股成本分析系統",
     page_icon="📈",
     layout="wide",
 )
@@ -39,77 +39,81 @@ def get_tw_stock_name(stock_code):
 # ----------------------------------------------------
 # 📊 抓取 FinMind 籌碼數據 (三大法人、融資、當沖)
 # ----------------------------------------------------
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=3600)
 def fetch_chip_data(stock_code, s_date, e_date):
-    # 1. 三大法人買賣超 (T86)
-    inst_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
-    resp_inst = requests.get(inst_url, timeout=15).json()
+    foreign_df = pd.DataFrame(columns=["date", "foreign_buy"])
+    inst_total_buy = pd.DataFrame(columns=["date", "inst_total_buy"])
+    margin_clean = pd.DataFrame(
+        columns=["date", "margin_delta", "margin_balance"]
+    )
+    dt_clean = pd.DataFrame(columns=["date", "daytrade_vol"])
 
-    # 2. 融資融券 (MI_MARGN)
-    margin_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMarginPurchaseShortSale&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
-    resp_margin = requests.get(margin_url, timeout=15).json()
+    try:
+        # 1. 三大法人買賣超 (T86)
+        inst_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
+        resp_inst = requests.get(inst_url, timeout=15).json()
+        if resp_inst.get("msg") == "success" and resp_inst.get("data"):
+            inst_df = pd.DataFrame(resp_inst["data"])
+            inst_df["buy"] = (
+                pd.to_numeric(inst_df["buy"], errors="coerce").fillna(0)
+                / 1000.0
+            )
 
-    # 3. 當沖統計
-    daytrade_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockDayTrading&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
-    resp_dt = requests.get(daytrade_url, timeout=15).json()
+            # 外資買進
+            f_mask = inst_df["name"].str.contains("Foreign|外資", na=False)
+            if f_mask.any():
+                foreign_df = (
+                    inst_df[f_mask]
+                    .groupby("date")["buy"]
+                    .sum()
+                    .reset_index(name="foreign_buy")
+                )
 
-    # 整理三大法人 (張數)
-    inst_df = pd.DataFrame(resp_inst.get("data", []))
-    if not inst_df.empty:
-        inst_df["buy"] = (
-            pd.to_numeric(inst_df["buy"], errors="coerce").fillna(0) / 1000.0
-        )
-        inst_df["sell"] = (
-            pd.to_numeric(inst_df["sell"], errors="coerce").fillna(0) / 1000.0
-        )
-        inst_df["net"] = inst_df["buy"] - inst_df["sell"]
+            # 三大法人總買進
+            inst_total_buy = (
+                inst_df.groupby("date")["buy"]
+                .sum()
+                .reset_index(name="inst_total_buy")
+            )
+    except Exception:
+        pass
 
-        foreign_df = (
-            inst_df[inst_df["name"].str.contains("Foreign|外資", na=False)]
-            .groupby("date")["buy"]
-            .sum()
-            .reset_index(name="foreign_buy")
-        )
-        inst_total_buy = (
-            inst_df.groupby("date")["buy"]
-            .sum()
-            .reset_index(name="inst_total_buy")
-        )
-    else:
-        foreign_df = pd.DataFrame(columns=["date", "foreign_buy"])
-        inst_total_buy = pd.DataFrame(columns=["date", "inst_total_buy"])
+    try:
+        # 2. 融資融券 (MI_MARGN)
+        margin_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMarginPurchaseShortSale&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
+        resp_margin = requests.get(margin_url, timeout=15).json()
+        if resp_margin.get("msg") == "success" and resp_margin.get("data"):
+            margin_df = pd.DataFrame(resp_margin["data"])
+            margin_df["MarginPurchase"] = pd.to_numeric(
+                margin_df.get("MarginPurchase", 0), errors="coerce"
+            ).fillna(0)
+            margin_df["MarginPurchaseTodayBalance"] = pd.to_numeric(
+                margin_df.get("MarginPurchaseTodayBalance", 0), errors="coerce"
+            ).fillna(0)
+            margin_clean = margin_df[
+                ["date", "MarginPurchase", "MarginPurchaseTodayBalance"]
+            ].rename(
+                columns={
+                    "MarginPurchase": "margin_delta",
+                    "MarginPurchaseTodayBalance": "margin_balance",
+                }
+            )
+    except Exception:
+        pass
 
-    # 整理融資 (張數)
-    margin_df = pd.DataFrame(resp_margin.get("data", []))
-    if not margin_df.empty:
-        margin_df["MarginPurchase"] = pd.to_numeric(
-            margin_df["MarginPurchase"], errors="coerce"
-        ).fillna(0)
-        margin_df["MarginPurchaseTodayBalance"] = pd.to_numeric(
-            margin_df["MarginPurchaseTodayBalance"], errors="coerce"
-        ).fillna(0)
-        margin_clean = margin_df[
-            ["date", "MarginPurchase", "MarginPurchaseTodayBalance"]
-        ].rename(
-            columns={
-                "MarginPurchase": "margin_delta",
-                "MarginPurchaseTodayBalance": "margin_balance",
-            }
-        )
-    else:
-        margin_clean = pd.DataFrame(
-            columns=["date", "margin_delta", "margin_balance"]
-        )
-
-    # 整理當沖 (股數 -> 張數，雙邊合計除以 2000)
-    dt_df = pd.DataFrame(resp_dt.get("data", []))
-    if not dt_df.empty and "BuyVolume" in dt_df.columns:
-        dt_df["daytrade_vol"] = pd.to_numeric(
-            dt_df["BuyVolume"], errors="coerce"
-        ).fillna(0)
-        dt_clean = dt_df[["date", "daytrade_vol"]]
-    else:
-        dt_clean = pd.DataFrame(columns=["date", "daytrade_vol"])
+    try:
+        # 3. 當沖統計
+        daytrade_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockDayTrading&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
+        resp_dt = requests.get(daytrade_url, timeout=15).json()
+        if resp_dt.get("msg") == "success" and resp_dt.get("data"):
+            dt_df = pd.DataFrame(resp_dt["data"])
+            if "BuyVolume" in dt_df.columns:
+                dt_df["daytrade_vol"] = pd.to_numeric(
+                    dt_df["BuyVolume"], errors="coerce"
+                ).fillna(0)
+                dt_clean = dt_df[["date", "daytrade_vol"]]
+    except Exception:
+        pass
 
     return inst_total_buy, foreign_df, margin_clean, dt_clean
 
@@ -119,7 +123,7 @@ def fetch_chip_data(stock_code, s_date, e_date):
 # ----------------------------------------------------
 st.title("📈 散戶 vs 法人 價量加權持股成本分析系統")
 st.caption(
-    "遵循計算規格書 v1.0：VWAP加權、除權息還原、當沖剔除、存貨加權沖銷、融資純度驗證"
+    "遵循計算規格書 v1.0：VWAP加權、除權息還原、當沖剔除、存貨加權沖銷、融資純度驗證"[cite: 1]
 )
 
 col1, col2, col3 = st.columns(3)
@@ -184,8 +188,15 @@ if stock_id:
         )
         df.index = pd.to_datetime(df.index).strftime("%Y-%m-%d")
 
-        # Step 0: 當日均價 (VWAP 逼近值)
+        # Step 0: 當日均價 (VWAP 逼近值)[cite: 1]
         df["adj_vwap"] = (df["High"] + df["Low"] + df["Close"]) / 3.0
+
+        # 初始化籌碼預設欄位 (防止 KeyError)
+        df["inst_total_buy"] = 0.0
+        df["foreign_buy"] = 0.0
+        df["margin_delta"] = 0.0
+        df["margin_balance"] = 0.0
+        df["daytrade_vol"] = 0.0
 
         # 合併籌碼資料
         inst_buy, foreign_buy, margin, dt = fetch_chip_data(
@@ -194,21 +205,22 @@ if stock_id:
 
         for sub_df in [inst_buy, foreign_buy, margin, dt]:
             if not sub_df.empty:
-                sub_df.set_index("date", inplace=True)
-                df = df.join(sub_df, how="left")
+                sub_df = sub_df.drop_duplicates(subset=["date"]).set_index(
+                    "date"
+                )
+                for col in sub_df.columns:
+                    df[col] = sub_df[col].reindex(df.index).fillna(0.0)
 
-        df.fillna(0, inplace=True)
-
-        # Step 1: 殘差散戶量 = 總成交量 - 三大法人買進
+        # Step 1: 殘差散戶量 = 總成交量 - 三大法人買進[cite: 1]
         df["raw_retail_vol"] = df["Total_Vol"] - df["inst_total_buy"]
 
-        # Step 2: 剔除當沖量 (當沖成交量 / 2000)
+        # Step 2: 剔除當沖量 (當沖成交量 / 2000)[cite: 1]
         df["daytrade_est"] = df["daytrade_vol"] / 2000.0
         df["eff_retail_vol"] = (
             df["raw_retail_vol"] - df["daytrade_est"]
         ).apply(lambda x: max(x, 0))
 
-        # Step 3: 純度指標與品質標記 (purity = margin_delta / eff_retail_vol)
+        # Step 3: 純度指標與品質標記 (purity = margin_delta / eff_retail_vol)[cite: 1]
         def calc_quality(row):
             if row["eff_retail_vol"] <= 0:
                 return "NA"
@@ -222,20 +234,19 @@ if stock_id:
 
         df["quality_flag"] = df.apply(calc_quality, axis=1)
 
-        # Step 4: 斷頭日偵測 (margin_delta / margin_balance[t-1] <= -3%)
+        # Step 4: 斷頭日偵測 (margin_delta / margin_balance[t-1] <= -3%)[cite: 1]
         df["margin_shift"] = df["margin_balance"].shift(1)
         df["blowout_day"] = (
             df["margin_delta"] / df["margin_shift"].replace(0, np.nan)
         ) <= -0.03
 
-        # Step 6: 存貨加權平均成本計算 (賣超以現行成本沖銷，成本不變部位減少)
+        # Step 6: 存貨加權平均成本計算 (賣超以現行成本沖銷，成本不變部位減少)[cite: 1]
         cum_cost_list = []
         cum_qty = 0.0
         cum_amt = 0.0
-        current_avg = df["adj_vwap"].iloc[0]
+        current_avg = float(df["adj_vwap"].iloc[0])
 
         for idx, row in df.iterrows():
-            # 斷頭日重置起算點
             if row["blowout_day"]:
                 cum_qty = 0.0
                 cum_amt = 0.0
@@ -259,7 +270,7 @@ if stock_id:
 
         df["retail_cost_range"] = cum_cost_list
 
-        # Step 7: 向量化滾動成本線 (N=5, 20, 60)
+        # Step 7: 向量化滾動成本線 (N=5, 20, 60)[cite: 1]
         retail_amt = df["eff_retail_vol"] * df["adj_vwap"]
         df["retail_cost_ma5"] = (
             retail_amt.rolling(5).sum() / df["eff_retail_vol"].rolling(5).sum()
@@ -273,7 +284,7 @@ if stock_id:
             / df["eff_retail_vol"].rolling(60).sum()
         ).fillna(df["Close"])
 
-        # 外資 20 日滾動成本
+        # 外資 20 日滾動成本[cite: 1]
         f_amt = df["foreign_buy"] * df["adj_vwap"]
         df["foreign_cost_ma20"] = (
             f_amt.rolling(20).sum() / df["foreign_buy"].rolling(20).sum()
