@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
+import numpy as np
 import pandas as pd
-import plotly.graph_objects as io_plotly
+import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
 import streamlit as st
@@ -10,14 +11,14 @@ import yfinance as yf
 # ⚙️ 頁面設定
 # ----------------------------------------------------
 st.set_page_config(
-    page_title="三大法人 vs 散戶 價量加權持股成本分析系統",
+    page_title="散戶 vs 法人 價量加權持股成本分析系統 (規格書 v1.0)",
     page_icon="📈",
     layout="wide",
 )
 
 
 # ----------------------------------------------------
-# 🏷️ 股票名稱查詢
+# 🏷️ 股票中文名稱查詢
 # ----------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_tw_stock_name(stock_code):
@@ -36,36 +37,96 @@ def get_tw_stock_name(stock_code):
 
 
 # ----------------------------------------------------
-# 📊 抓取三大法人買賣超 (外資 + 投信 + 自營商)
+# 📊 抓取 FinMind 籌碼數據 (三大法人、融資、當沖)
 # ----------------------------------------------------
 @st.cache_data(ttl=1800)
-def fetch_institutional_data(stock_code, s_date, e_date):
-    url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
-    resp = requests.get(url, timeout=15)
-    data = resp.json()
+def fetch_chip_data(stock_code, s_date, e_date):
+    # 1. 三大法人買賣超 (T86)
+    inst_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
+    resp_inst = requests.get(inst_url, timeout=15).json()
 
-    if data.get("msg") == "success" and data.get("data"):
-        df = pd.DataFrame(data["data"])
-        df["buy"] = pd.to_numeric(df["buy"], errors="coerce") / 1000.0  # 轉為張數
+    # 2. 融資融券 (MI_MARGN)
+    margin_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMarginPurchaseShortSale&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
+    resp_margin = requests.get(margin_url, timeout=15).json()
 
-        # 彙總三大法人（外資、投信、自營商）每日總買進張數
-        inst_buy = df.groupby("date")["buy"].sum().reset_index()
-        inst_buy.rename(columns={"buy": "Inst_Buy"}, inplace=True)
-        return inst_buy
+    # 3. 當沖統計
+    daytrade_url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockDayTrading&data_id={stock_code}&start_date={s_date}&end_date={e_date}"
+    resp_dt = requests.get(daytrade_url, timeout=15).json()
 
-    return pd.DataFrame(columns=["date", "Inst_Buy"])
+    # 整理三大法人 (張數)
+    inst_df = pd.DataFrame(resp_inst.get("data", []))
+    if not inst_df.empty:
+        inst_df["buy"] = (
+            pd.to_numeric(inst_df["buy"], errors="coerce").fillna(0) / 1000.0
+        )
+        inst_df["sell"] = (
+            pd.to_numeric(inst_df["sell"], errors="coerce").fillna(0) / 1000.0
+        )
+        inst_df["net"] = inst_df["buy"] - inst_df["sell"]
+
+        foreign_df = (
+            inst_df[inst_df["name"].str.contains("Foreign|外資", na=False)]
+            .groupby("date")["buy"]
+            .sum()
+            .reset_index(name="foreign_buy")
+        )
+        inst_total_buy = (
+            inst_df.groupby("date")["buy"]
+            .sum()
+            .reset_index(name="inst_total_buy")
+        )
+    else:
+        foreign_df = pd.DataFrame(columns=["date", "foreign_buy"])
+        inst_total_buy = pd.DataFrame(columns=["date", "inst_total_buy"])
+
+    # 整理融資 (張數)
+    margin_df = pd.DataFrame(resp_margin.get("data", []))
+    if not margin_df.empty:
+        margin_df["MarginPurchase"] = pd.to_numeric(
+            margin_df["MarginPurchase"], errors="coerce"
+        ).fillna(0)
+        margin_df["MarginPurchaseTodayBalance"] = pd.to_numeric(
+            margin_df["MarginPurchaseTodayBalance"], errors="coerce"
+        ).fillna(0)
+        margin_clean = margin_df[
+            ["date", "MarginPurchase", "MarginPurchaseTodayBalance"]
+        ].rename(
+            columns={
+                "MarginPurchase": "margin_delta",
+                "MarginPurchaseTodayBalance": "margin_balance",
+            }
+        )
+    else:
+        margin_clean = pd.DataFrame(
+            columns=["date", "margin_delta", "margin_balance"]
+        )
+
+    # 整理當沖 (股數 -> 張數，雙邊合計除以 2000)
+    dt_df = pd.DataFrame(resp_dt.get("data", []))
+    if not dt_df.empty and "BuyVolume" in dt_df.columns:
+        dt_df["daytrade_vol"] = pd.to_numeric(
+            dt_df["BuyVolume"], errors="coerce"
+        ).fillna(0)
+        dt_clean = dt_df[["date", "daytrade_vol"]]
+    else:
+        dt_clean = pd.DataFrame(columns=["date", "daytrade_vol"])
+
+    return inst_total_buy, foreign_df, margin_clean, dt_clean
 
 
 # ----------------------------------------------------
-# 🚀 主程式
+# 🚀 主程式介面
 # ----------------------------------------------------
-st.title("📈 三大法人 vs 純散戶 價量加權持股成本分析系統")
+st.title("📈 散戶 vs 法人 價量加權持股成本分析系統")
+st.caption(
+    "遵循計算規格書 v1.0：VWAP加權、除權息還原、當沖剔除、存貨加權沖銷、融資純度驗證"
+)
 
 col1, col2, col3 = st.columns(3)
 with col1:
     stock_id = st.text_input("【股票代號】", value="2330").strip()
 with col2:
-    default_start = datetime.today() - timedelta(days=120)
+    default_start = datetime.today() - timedelta(days=180)
     start_date = st.date_input("【開始日期】", value=default_start)
 with col3:
     default_end = datetime.today()
@@ -79,24 +140,22 @@ if stock_id:
     s_str = start_date.strftime("%Y-%m-%d")
     e_str = end_date.strftime("%Y-%m-%d")
 
-    # 抓取三大法人資料
-    inst_df = fetch_institutional_data(stock_id, s_str, e_str)
-
-    # 抓取行情 (K線)
+    # 抓取行情 (自動除權息還原)
     ticker = f"{stock_id}.TW"
     price_df = yf.download(
         ticker,
         start=s_str,
         end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+        auto_adjust=True,
         progress=False,
     )
-
     if price_df.empty:
         ticker = f"{stock_id}.TWO"
         price_df = yf.download(
             ticker,
             start=s_str,
             end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+            auto_adjust=True,
             progress=False,
         )
 
@@ -106,7 +165,7 @@ if stock_id:
             high_s = price_df["High"][ticker]
             low_s = price_df["Low"][ticker]
             close_s = price_df["Close"][ticker]
-            vol_s = price_df["Volume"][ticker] / 1000.0  # 張數
+            vol_s = price_df["Volume"][ticker] / 1000.0
         else:
             open_s = price_df["Open"]
             high_s = price_df["High"]
@@ -114,7 +173,7 @@ if stock_id:
             close_s = price_df["Close"]
             vol_s = price_df["Volume"] / 1000.0
 
-        plot_df = pd.DataFrame(
+        df = pd.DataFrame(
             {
                 "Open": open_s,
                 "High": high_s,
@@ -123,137 +182,215 @@ if stock_id:
                 "Total_Vol": vol_s,
             }
         )
-        plot_df.index = pd.to_datetime(plot_df.index).strftime("%Y-%m-%d")
+        df.index = pd.to_datetime(df.index).strftime("%Y-%m-%d")
 
-        # 合併法人買盤
-        if not inst_df.empty:
-            inst_df.set_index("date", inplace=True)
-            plot_df = plot_df.join(inst_df, how="left")
-        else:
-            plot_df["Inst_Buy"] = 0
+        # Step 0: 當日均價 (VWAP 逼近值)
+        df["adj_vwap"] = (df["High"] + df["Low"] + df["Close"]) / 3.0
 
-        plot_df["Inst_Buy"] = plot_df["Inst_Buy"].fillna(0)
-
-        # 💡 精化計算 1：計算當日典型均價 (Typical Price)，比單純用收盤價更貼近全日買進均價
-        plot_df["Typical_Price"] = (
-            plot_df["High"] + plot_df["Low"] + plot_df["Close"]
-        ) / 3.0
-
-        # 💡 精化計算 2：扣除三大法人（外資+投信+自營商）取得純散戶張數
-        plot_df["Retail_Buy"] = (
-            plot_df["Total_Vol"] - plot_df["Inst_Buy"]
-        ).apply(lambda x: max(x, 1))
-
-        # 每日成交金額估算
-        plot_df["Inst_Amt"] = plot_df["Inst_Buy"] * plot_df["Typical_Price"]
-        plot_df["Retail_Amt"] = (
-            plot_df["Retail_Buy"] * plot_df["Typical_Price"]
+        # 合併籌碼資料
+        inst_buy, foreign_buy, margin, dt = fetch_chip_data(
+            stock_id, s_str, e_str
         )
 
-        # 20日滾動價量加權成本 (VWAP)
-        plot_df["Inst_20D_Cost"] = (
-            plot_df["Inst_Amt"].rolling(20).sum()
-            / plot_df["Inst_Buy"].rolling(20).sum()
-        )
-        plot_df["Retail_20D_Cost"] = (
-            plot_df["Retail_Amt"].rolling(20).sum()
-            / plot_df["Retail_Buy"].rolling(20).sum()
-        )
+        for sub_df in [inst_buy, foreign_buy, margin, dt]:
+            if not sub_df.empty:
+                sub_df.set_index("date", inplace=True)
+                df = df.join(sub_df, how="left")
 
-        # 若缺乏法人買盤則以 20日均價填補
-        plot_df["MA20"] = plot_df["Close"].rolling(20).mean()
-        plot_df["Inst_20D_Cost"] = plot_df["Inst_20D_Cost"].fillna(
-            plot_df["MA20"]
-        )
-        plot_df["Retail_20D_Cost"] = plot_df["Retail_20D_Cost"].fillna(
-            plot_df["MA20"]
-        )
+        df.fillna(0, inplace=True)
 
-        # 最新損益狀態判定
-        latest_close = float(plot_df["Close"].iloc[-1])
-        latest_retail_cost = float(plot_df["Retail_20D_Cost"].iloc[-1])
-        latest_inst_cost = float(plot_df["Inst_20D_Cost"].iloc[-1])
+        # Step 1: 殘差散戶量 = 總成交量 - 三大法人買進
+        df["raw_retail_vol"] = df["Total_Vol"] - df["inst_total_buy"]
 
-        retail_pnl_pct = (
+        # Step 2: 剔除當沖量 (當沖成交量 / 2000)
+        df["daytrade_est"] = df["daytrade_vol"] / 2000.0
+        df["eff_retail_vol"] = (
+            df["raw_retail_vol"] - df["daytrade_est"]
+        ).apply(lambda x: max(x, 0))
+
+        # Step 3: 純度指標與品質標記 (purity = margin_delta / eff_retail_vol)
+        def calc_quality(row):
+            if row["eff_retail_vol"] <= 0:
+                return "NA"
+            p = row["margin_delta"] / row["eff_retail_vol"]
+            if p >= 0.30:
+                return "HIGH"
+            elif p >= 0.10:
+                return "MEDIUM"
+            else:
+                return "LOW"
+
+        df["quality_flag"] = df.apply(calc_quality, axis=1)
+
+        # Step 4: 斷頭日偵測 (margin_delta / margin_balance[t-1] <= -3%)
+        df["margin_shift"] = df["margin_balance"].shift(1)
+        df["blowout_day"] = (
+            df["margin_delta"] / df["margin_shift"].replace(0, np.nan)
+        ) <= -0.03
+
+        # Step 6: 存貨加權平均成本計算 (賣超以現行成本沖銷，成本不變部位減少)
+        cum_cost_list = []
+        cum_qty = 0.0
+        cum_amt = 0.0
+        current_avg = df["adj_vwap"].iloc[0]
+
+        for idx, row in df.iterrows():
+            # 斷頭日重置起算點
+            if row["blowout_day"]:
+                cum_qty = 0.0
+                cum_amt = 0.0
+
+            q = row["eff_retail_vol"]
+            p = row["adj_vwap"]
+
+            if q > 0:
+                cum_amt += q * p
+                cum_qty += q
+                current_avg = cum_amt / cum_qty if cum_qty > 0 else current_avg
+            elif q < 0:
+                sell_q = abs(q)
+                cum_amt -= sell_q * current_avg
+                cum_qty -= sell_q
+                if cum_qty <= 0:
+                    cum_qty = 0.0
+                    cum_amt = 0.0
+
+            cum_cost_list.append(current_avg)
+
+        df["retail_cost_range"] = cum_cost_list
+
+        # Step 7: 向量化滾動成本線 (N=5, 20, 60)
+        retail_amt = df["eff_retail_vol"] * df["adj_vwap"]
+        df["retail_cost_ma5"] = (
+            retail_amt.rolling(5).sum() / df["eff_retail_vol"].rolling(5).sum()
+        ).fillna(df["Close"])
+        df["retail_cost_ma20"] = (
+            retail_amt.rolling(20).sum()
+            / df["eff_retail_vol"].rolling(20).sum()
+        ).fillna(df["Close"])
+        df["retail_cost_ma60"] = (
+            retail_amt.rolling(60).sum()
+            / df["eff_retail_vol"].rolling(60).sum()
+        ).fillna(df["Close"])
+
+        # 外資 20 日滾動成本
+        f_amt = df["foreign_buy"] * df["adj_vwap"]
+        df["foreign_cost_ma20"] = (
+            f_amt.rolling(20).sum() / df["foreign_buy"].rolling(20).sum()
+        ).fillna(df["Close"])
+
+        # 狀態指標顯示
+        latest_close = float(df["Close"].iloc[-1])
+        latest_retail_cost = float(df["retail_cost_ma20"].iloc[-1])
+        latest_foreign_cost = float(df["foreign_cost_ma20"].iloc[-1])
+        dev_pct = (
             (latest_close - latest_retail_cost) / latest_retail_cost
-        ) * 100
-        inst_pnl_pct = (
-            (latest_close - latest_inst_cost) / latest_inst_cost
         ) * 100
 
         st.markdown("---")
-        st_col1, st_col2 = st.columns(2)
-        with st_col1:
-            st.markdown("#### 🔵 三大法人（大戶）狀態")
-            if latest_close >= latest_inst_cost:
-                st.success(
-                    f"🟢 **法人獲利中** (現價高於法人成本 {inst_pnl_pct:+.2f}%)"
-                )
-            else:
-                st.warning(
-                    f"⚠️ **法人套牢中** (現價低於法人成本 {inst_pnl_pct:+.2f}%)"
-                )
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("最新還原收盤價", f"{latest_close:.2f} 元")
+        c2.metric("散戶20D洗淨成本", f"{latest_retail_cost:.2f} 元")
+        c3.metric("外資20D預估成本", f"{latest_foreign_cost:.2f} 元")
+        c4.metric(
+            "散戶狀態",
+            "🟢 獲利中" if latest_close >= latest_retail_cost else "⚠️ 散戶套牢中",
+            f"{dev_pct:+.2f}%",
+        )
 
-        with st_col2:
-            st.markdown("#### 🟠 純散戶狀態")
-            if latest_close >= latest_retail_cost:
-                st.success(
-                    f"🟢 **散戶獲利中** (現價高於散戶成本 {retail_pnl_pct:+.2f}%)"
-                )
-            else:
-                st.warning(
-                    f"⚠️ **散戶套牢中** (現價低於散戶成本 {retail_pnl_pct:+.2f}%)"
-                )
-
-        # 💡 指標說明卡片
+        # 💡 限制與定義說明
         st.info(
             """
-            **📊 成本均線與模型說明：**
-            * 🔵 **藍色線【三大法人加權成本 (20D)】**：外資、投信、自營商在近 20 日內的典型成交加權平均成本。當股價高於此線，代表三大法人處於獲利控盤狀態。
-            * 🟠 **橘色線【純散戶加權成本 (20D)】**：總成交量完整扣除三大法人買盤後的散戶 20 日加權平均成本。
-            * 💡 **算法特點**：改採當日典型價格 $(High + Low + Close) / 3$ 結合價量加權（VWAP），有效降低單一收盤價的失真率。
+            **📋 系統計算規格與限制說明：**
+            1. **散戶成本為推估殘差值**：已剔除三大法人及當沖量，僅供相對支撐/壓力參考。
+            2. **均線標示**：🟣 **紫色實線**為【散戶洗淨成本 (20D)】；🔵 **藍色虛線**為【外資預估成本 (20D)】。
+            3. **賣超處理**：固定採「**存貨加權平均法**」沖銷，賣超期間均價不變僅部位減少。
+            4. **綠色垂直線**：代表偵測到融資單日大減之【斷頭重置日 (Blowout Day)】。
             """
         )
 
         # 繪製圖表
-        fig = make_subplots(specs=[[{"secondary_y": False}]])
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.04,
+            row_heights=[0.75, 0.25],
+        )
 
+        # K線
         fig.add_trace(
-            io_plotly.Candlestick(
-                x=plot_df.index,
-                open=plot_df["Open"],
-                high=plot_df["High"],
-                low=plot_df["Low"],
-                close=plot_df["Close"],
+            go.Candlestick(
+                x=df.index,
+                open=df["Open"],
+                high=df["High"],
+                low=df["Low"],
+                close=df["Close"],
                 name="K線",
-            )
+            ),
+            row=1,
+            col=1,
         )
 
-        # 三大法人價量加權成本線 (藍色)
+        # 散戶成本線 (紫色實線)
         fig.add_trace(
-            io_plotly.Scatter(
-                x=plot_df.index,
-                y=plot_df["Inst_20D_Cost"],
-                name="🔵 三大法人成本 (20D)",
-                line=dict(color="#1f77b4", width=2.5),
-            )
+            go.Scatter(
+                x=df.index,
+                y=df["retail_cost_ma20"],
+                name="🟣 散戶洗淨成本 (20D)",
+                line=dict(color="#ab63fa", width=2.5),
+            ),
+            row=1,
+            col=1,
         )
 
-        # 純散戶價量加權成本線 (橘色)
+        # 外資成本線 (藍色虛線)
         fig.add_trace(
-            io_plotly.Scatter(
-                x=plot_df.index,
-                y=plot_df["Retail_20D_Cost"],
-                name="🟠 純散戶成本 (20D)",
-                line=dict(color="#ff7f0e", width=2.5),
+            go.Scatter(
+                x=df.index,
+                y=df["foreign_cost_ma20"],
+                name="🔵 外資預估成本 (20D)",
+                line=dict(color="#00cc96", width=2, dash="dot"),
+            ),
+            row=1,
+            col=1,
+        )
+
+        # 標記斷頭日
+        blowout_dates = df[df["blowout_day"]].index
+        for b_date in blowout_dates:
+            fig.add_vline(
+                x=b_date,
+                line_width=1.5,
+                line_dash="dash",
+                line_color="#00FF7F",
+                annotation_text=f"斷頭重置 ({b_date})",
+                annotation_position="top left",
+                row=1,
+                col=1,
             )
+
+        # 成交量柱狀圖
+        colors = [
+            "#ef553b" if c >= o else "#00cc96"
+            for c, o in zip(df["Close"], df["Open"])
+        ]
+        fig.add_trace(
+            go.Bar(
+                x=df.index,
+                y=df["Total_Vol"],
+                name="成交量 (張)",
+                marker_color=colors,
+            ),
+            row=2,
+            col=1,
         )
 
         fig.update_layout(
             title=dict(
-                text=f"{title_text} 三大法人 vs 散戶持股成本走勢圖",
+                text=f"{title_text} 散戶 vs 法人籌碼成本走勢圖",
                 x=0.5,
-                font=dict(size=15),
+                font=dict(size=16),
             ),
             xaxis=dict(
                 fixedrange=True,
@@ -261,7 +398,13 @@ if stock_id:
                 rangebreaks=[dict(bounds=["sat", "mon"])],
                 rangeslider=dict(visible=False),
             ),
+            xaxis2=dict(
+                type="date",
+                rangebreaks=[dict(bounds=["sat", "mon"])],
+                rangeslider=dict(visible=False),
+            ),
             yaxis=dict(fixedrange=True, side="right"),
+            yaxis2=dict(fixedrange=True, side="right", title="成交量 (張)"),
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
@@ -276,27 +419,5 @@ if stock_id:
             use_container_width=True,
             config={"scrollZoom": False, "displayModeBar": False},
         )
-
-        # 數據統計整理
-        total_inst_amt = plot_df["Inst_Amt"].sum()
-        total_inst_qty = plot_df["Inst_Buy"].sum()
-        overall_inst_cost = (
-            total_inst_amt / total_inst_qty if total_inst_qty > 0 else 0
-        )
-
-        total_retail_amt = plot_df["Retail_Amt"].sum()
-        total_retail_qty = plot_df["Retail_Buy"].sum()
-        overall_retail_cost = (
-            total_retail_amt / total_retail_qty if total_retail_qty > 0 else 0
-        )
-
-        st.markdown("### 📋 區間籌碼成本總結")
-        m1, m2 = st.columns(2)
-        m1.metric(
-            "🔵 三大法人全區間平均成本", f"{overall_inst_cost:.2f} 元"
-        )
-        m2.metric(
-            "🟠 純散戶全區間平均成本", f"{overall_retail_cost:.2f} 元"
-        )
     else:
-        st.warning("⚠️ 查無此股票行情資料，請確認股票代號是否正確。")
+        st.warning("⚠️ 查無行情資料，請確認股票代號。")
