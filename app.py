@@ -123,7 +123,7 @@ def fetch_chip_data(stock_code, s_date, e_date):
 # ----------------------------------------------------
 st.title("📈 散戶 vs 法人 價量加權持股成本分析系統")
 st.caption(
-    "遵循計算規格書 v1.0：VWAP加權、除權息還原、當沖剔除、存貨加權沖銷、融資純度驗證"[cite: 1]
+    "遵循計算規格書 v1.0：VWAP加權、除權息還原、當沖剔除、存貨加權沖銷、融資純度驗證"
 )
 
 col1, col2, col3 = st.columns(3)
@@ -188,7 +188,7 @@ if stock_id:
         )
         df.index = pd.to_datetime(df.index).strftime("%Y-%m-%d")
 
-        # Step 0: 當日均價 (VWAP 逼近值)[cite: 1]
+        # Step 0: 當日均價 (VWAP 逼近值)
         df["adj_vwap"] = (df["High"] + df["Low"] + df["Close"]) / 3.0
 
         # 初始化籌碼預設欄位 (防止 KeyError)
@@ -211,16 +211,16 @@ if stock_id:
                 for col in sub_df.columns:
                     df[col] = sub_df[col].reindex(df.index).fillna(0.0)
 
-        # Step 1: 殘差散戶量 = 總成交量 - 三大法人買進[cite: 1]
+        # Step 1: 殘差散戶量 = 總成交量 - 三大法人買進
         df["raw_retail_vol"] = df["Total_Vol"] - df["inst_total_buy"]
 
-        # Step 2: 剔除當沖量 (當沖成交量 / 2000)[cite: 1]
+        # Step 2: 剔除當沖量 (當沖成交量 / 2000)
         df["daytrade_est"] = df["daytrade_vol"] / 2000.0
         df["eff_retail_vol"] = (
             df["raw_retail_vol"] - df["daytrade_est"]
         ).apply(lambda x: max(x, 0))
 
-        # Step 3: 純度指標與品質標記 (purity = margin_delta / eff_retail_vol)[cite: 1]
+        # Step 3: 純度指標與品質標記 (purity = margin_delta / eff_retail_vol)
         def calc_quality(row):
             if row["eff_retail_vol"] <= 0:
                 return "NA"
@@ -234,13 +234,13 @@ if stock_id:
 
         df["quality_flag"] = df.apply(calc_quality, axis=1)
 
-        # Step 4: 斷頭日偵測 (margin_delta / margin_balance[t-1] <= -3%)[cite: 1]
+        # Step 4: 斷頭日偵測 (margin_delta / margin_balance[t-1] <= -3%)
         df["margin_shift"] = df["margin_balance"].shift(1)
         df["blowout_day"] = (
             df["margin_delta"] / df["margin_shift"].replace(0, np.nan)
         ) <= -0.03
 
-        # Step 6: 存貨加權平均成本計算 (賣超以現行成本沖銷，成本不變部位減少)[cite: 1]
+        # Step 6: 存貨加權平均成本計算 (賣超以現行成本沖銷，成本不變部位減少)
         cum_cost_list = []
         cum_qty = 0.0
         cum_amt = 0.0
@@ -270,7 +270,7 @@ if stock_id:
 
         df["retail_cost_range"] = cum_cost_list
 
-        # Step 7: 向量化滾動成本線 (N=5, 20, 60)[cite: 1]
+        # Step 7: 向量化滾動成本線 (N=5, 20, 60)
         retail_amt = df["eff_retail_vol"] * df["adj_vwap"]
         df["retail_cost_ma5"] = (
             retail_amt.rolling(5).sum() / df["eff_retail_vol"].rolling(5).sum()
@@ -284,7 +284,7 @@ if stock_id:
             / df["eff_retail_vol"].rolling(60).sum()
         ).fillna(df["Close"])
 
-        # 外資 20 日滾動成本[cite: 1]
+        # 外資 20 日滾動成本
         f_amt = df["foreign_buy"] * df["adj_vwap"]
         df["foreign_cost_ma20"] = (
             f_amt.rolling(20).sum() / df["foreign_buy"].rolling(20).sum()
